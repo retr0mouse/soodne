@@ -1,3 +1,4 @@
+# docker-compose.yml
 version: '3.8'
 
 services:
@@ -52,10 +53,10 @@ services:
       context: ./backend
     container_name: migrate
     command: alembic upgrade head
-    depends_on:
-      - db
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/your_db
+    depends_on:
+      - db
     networks:
       - app-network
 
