@@ -3,43 +3,64 @@ version: '3.8'
 services:
   frontend:
     build:
-      context: ./docker/frontend
-    ports:
-      - "3000:3000"
+      context: ./frontend
+    container_name: frontend
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - PUBLIC_URL=/
     depends_on:
       - backend
+    networks:
+      - app-network
 
   backend:
     build:
-      context: ./docker/backend
-    ports:
-      - "8000:8000"
+      context: ./backend
+    container_name: backend
     environment:
       - DATABASE_URL=postgresql://user:password@db:5432/your_db
     depends_on:
       - db
+    networks:
+      - app-network
 
   db:
     image: postgres:13
+    container_name: db
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
       POSTGRES_DB: your_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    networks:
+      - app-network
 
   nginx:
     build:
-      context: ./docker/nginx
+      context: ./nginx
+    container_name: nginx
     ports:
       - "80:80"
     depends_on:
       - frontend
       - backend
+    networks:
+      - app-network
+
+  migrate:
+    build:
+      context: ./backend
+    container_name: migrate
+    command: alembic upgrade head
+    depends_on:
+      - db
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/your_db
+    networks:
+      - app-network
 
 volumes:
   postgres_data:
+
+networks:
+  app-network:

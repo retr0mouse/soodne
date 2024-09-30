@@ -1,6 +1,6 @@
 from typing import Tuple
-import difflib
+from rapidfuzz import fuzz
 
 def match_products(name1: str, name2: str) -> Tuple[bool, float]:
-    similarity = difflib.SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
-    return (similarity > 0.8, round(similarity, 2))
+    similarity = fuzz.token_set_ratio(name1.lower(), name2.lower())
+    return (similarity > 80, round(similarity, 2))

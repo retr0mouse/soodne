@@ -1,5 +1,7 @@
 from fastapi import FastAPI
-from .api import products_router, stores_router, matching_router
+from .api.products import router as products_router
+from .api.stores import router as stores_router
+from .api.matching import router as matching_router
 
 app = FastAPI(
     title="Food Price Comparison API",
