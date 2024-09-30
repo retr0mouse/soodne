@@ -1,6 +1,12 @@
+import logging
+
 from fastapi import FastAPI
+
 from app.api.v1.api import api_router
 from app.core.scheduler import scheduler
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="API сравнения цен на продукты питания",
