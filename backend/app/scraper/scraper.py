@@ -1,5 +1,3 @@
-# app/scraper/scraper.py
-
 import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -31,7 +29,6 @@ def scrape_store_products():
     user_agent = 'Soodne/1.0 (+Daniil Šarin <nuacho@tlu.ee>)'
     headers = {'User-Agent': user_agent}
 
-    # Скрейпинг Barbora
     barbora_store = store_service.get_by_name(db, name="Barbora")
     if not barbora_store:
         store_data = schemas.StoreCreate(
@@ -41,7 +38,6 @@ def scrape_store_products():
         barbora_store = store_service.create(db, store=store_data)
     get_all_barbora_items(db, barbora_store, headers, user_agent)
 
-    # Скрейпинг Rimi
     rimi_store = store_service.get_by_name(db, name="Rimi")
     if not rimi_store:
         store_data = schemas.StoreCreate(

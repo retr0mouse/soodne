@@ -1,12 +1,14 @@
 import logging
 from typing import Tuple
-
 import numpy as np
 import torch
 from PIL import Image
 from sentence_transformers import SentenceTransformer
-from sqlalchemy.orm import Session
 from torchvision import models, transforms
+from rapidfuzz import fuzz
+import requests
+from io import BytesIO
+import re
 
 from app import models, schemas
 from app.database.database import SessionLocal
@@ -28,6 +30,11 @@ preprocess = transforms.Compose([
     )
 ])
 
+def preprocess_name(name: str) -> str:
+    name = re.sub(r'[^\w\s]', '', name)
+    name = name.lower()
+    return name
+
 def get_image_embedding(url: str) -> np.ndarray:
     try:
         response = requests.get(url, timeout=5)
@@ -45,20 +52,29 @@ def get_image_embedding(url: str) -> np.ndarray:
 def compare_weight(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> float:
     if not psd1.store_weight_value or not psd2.store_weight_value:
         return 0
-    weight1 = float(psd1.store_weight_value)
-    weight2 = float(psd2.store_weight_value)
-    tolerance = 0.05
-    return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
+    try:
+        weight1 = float(psd1.store_weight_value)
+        weight2 = float(psd2.store_weight_value)
+        tolerance = 0.05
+        return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
+    except Exception as e:
+        logger.error(f"Error comparing weights: {e}")
+        return 0
 
 def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> Tuple[bool, float]:
-    name1 = psd1.store_product_name.lower()
-    name2 = psd2.store_product_name.lower()
+    name1 = preprocess_name(psd1.store_product_name)
+    name2 = preprocess_name(psd2.store_product_name)
+
     name_embedding1 = sentence_model.encode(name1)
     name_embedding2 = sentence_model.encode(name2)
     cosine_sim = np.dot(name_embedding1, name_embedding2) / (
             np.linalg.norm(name_embedding1) * np.linalg.norm(name_embedding2)
     )
     name_similarity = cosine_sim * 100
+
+    fuzzy_similarity = fuzz.token_set_ratio(name1, name2)
+
+    combined_name_similarity = (name_similarity * 0.7) + (fuzzy_similarity * 0.3)
 
     weight_match = compare_weight(psd1, psd2)
 
@@ -72,7 +88,7 @@ def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
         )
         image_similarity = image_cosine_sim * 100
 
-    total_score = (name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
+    total_score = (combined_name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
     matched = total_score > 80
 
     return matched, round(total_score, 2)
