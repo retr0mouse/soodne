@@ -5,7 +5,7 @@ from .api.matching import router as matching_router
 
 app = FastAPI(
     title="Food Price Comparison API",
-    description="API для сравнения цен на продукты питания из разных магазинов",
+    description="API Food Price Comparison",
     version="1.0.0",
 )
 
