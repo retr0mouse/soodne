@@ -17,7 +17,7 @@ target_metadata = Base.metadata
 def run_migrations_offline():
     url = os.getenv('DATABASE_URL')
     if not url:
-        raise ValueError("DATABASE_URL не установлена в переменных окружения")
+        raise ValueError("DATABASE_URL")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -30,7 +30,7 @@ def run_migrations_offline():
 def run_migrations_online():
     url = os.getenv('DATABASE_URL')
     if not url:
-        raise ValueError("DATABASE_URL не установлена в переменных окружения")
+        raise ValueError("DATABASE_URL")
 
     connectable = engine_from_config(
         {

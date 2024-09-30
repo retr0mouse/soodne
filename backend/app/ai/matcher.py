@@ -1,6 +1,99 @@
 from typing import Tuple
-from rapidfuzz import fuzz
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import torch
+from torchvision import models, transforms
+from PIL import Image
+import requests
+from io import BytesIO
+from sqlalchemy.orm import Session
+from app.database.database import SessionLocal
+from app import models, schemas
+from app.services import (
+    product_store_data_service,
+    product_matching_log_service
+)
 
-def match_products(name1: str, name2: str) -> Tuple[bool, float]:
-    similarity = fuzz.token_set_ratio(name1.lower(), name2.lower())
-    return (similarity > 80, round(similarity, 2))
+# Инициализация моделей
+sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+image_model = models.resnet18(pretrained=True)
+image_model.eval()
+
+preprocess = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
+
+def get_image_embedding(url):
+    try:
+        response = requests.get(url, timeout=5)
+        image = Image.open(BytesIO(response.content)).convert('RGB')
+        image = preprocess(image)
+        image = image.unsqueeze(0)
+        with torch.no_grad():
+            embedding = image_model(image).numpy().flatten()
+        return embedding
+    except:
+        return np.zeros(512)
+
+def compare_weight(psd1, psd2):
+    if not psd1.store_weight_value or not psd2.store_weight_value:
+        return 0
+    weight1 = float(psd1.store_weight_value)
+    weight2 = float(psd2.store_weight_value)
+    tolerance = 0.05
+    return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
+
+def match_products(psd1, psd2) -> Tuple[bool, float]:
+    name1 = psd1.store_product_name.lower()
+    name2 = psd2.store_product_name.lower()
+    name_embedding1 = sentence_model.encode(name1)
+    name_embedding2 = sentence_model.encode(name2)
+    cosine_sim = np.dot(name_embedding1, name_embedding2) / (np.linalg.norm(name_embedding1) * np.linalg.norm(name_embedding2))
+    name_similarity = cosine_sim * 100
+
+    weight_match = compare_weight(psd1, psd2)
+
+    image_embedding1 = get_image_embedding(psd1.store_image_url)
+    image_embedding2 = get_image_embedding(psd2.store_image_url)
+    if np.linalg.norm(image_embedding1) == 0 or np.linalg.norm(image_embedding2) == 0:
+        image_similarity = 0
+    else:
+        image_cosine_sim = np.dot(image_embedding1, image_embedding2) / (np.linalg.norm(image_embedding1) * np.linalg.norm(image_embedding2))
+        image_similarity = image_cosine_sim * 100
+
+    total_score = (name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
+    matched = total_score > 80
+
+    return matched, round(total_score, 2)
+
+def run_ai_matching():
+    db: Session = SessionLocal()
+    unmatched_psds = db.query(models.ProductStoreData).filter(
+        models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
+    ).all()
+    for psd in unmatched_psds:
+        similar_psds = db.query(models.ProductStoreData).filter(
+            models.ProductStoreData.store_id != psd.store_id,
+            models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
+        ).all()
+        for similar_psd in similar_psds:
+            matched, confidence = match_products(psd, similar_psd)
+            if matched:
+                psd.matching_status = schemas.MatchingStatusEnum.matched
+                similar_psd.matching_status = schemas.MatchingStatusEnum.matched
+                log = schemas.ProductMatchingLogCreate(
+                    product_store_id=psd.product_store_id,
+                    product_id=similar_psd.product_id,
+                    confidence_score=confidence,
+                    matched_by="ai_matcher"
+                )
+                product_matching_log_service.create(db, log=log)
+                db.commit()
+                break
+    db.close()
