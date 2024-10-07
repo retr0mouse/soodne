@@ -1,3 +1,5 @@
+# app/scraper/scrape_store_products.py
+
 import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -13,6 +15,7 @@ import random
 import time
 import json
 import urllib.robotparser
+from app.core.logger import logger  # Импортируем настроенный логгер
 
 def random_delay(min_seconds, max_seconds):
     return random.uniform(min_seconds, max_seconds)
@@ -52,7 +55,7 @@ def scrape_store_products():
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     categories = get_barbora_categories(headers, user_agent)
     for category_index, category in enumerate(categories):
-        print(f"{category_index} - Парсинг Barbora категории: {category['title']}")
+        logger.info(f"{category_index} - Парсинг Barbora категории: {category['title']}")
         if not category['link']:
             continue
         category_items = get_barbora_items_by_category(category, headers, user_agent)
@@ -62,9 +65,10 @@ def get_all_barbora_items(db: Session, store, headers, user_agent):
 def get_barbora_categories(headers, user_agent):
     url = 'https://barbora.ee'
     if not is_allowed(url, user_agent):
-        print(f"Доступ к {url} запрещен согласно robots.txt")
+        logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
         return []
     response = requests.get(url, headers=headers)
+    response.encoding = 'utf-8'  # Указываем кодировку явно
     response.raise_for_status()
     soup = BeautifulSoup(response.text, 'html.parser')
     categories = soup.select('li.b-categories-root-category > a')
@@ -82,13 +86,19 @@ def get_barbora_items_by_category(category, headers, user_agent):
         time.sleep(random_delay(3, 7))
         url = f"https://barbora.ee{category['link']}?page={current_page}"
         if not is_allowed(url, user_agent):
-            print(f"Доступ к {url} запрещен согласно robots.txt")
+            logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
             break
         response = requests.get(url, headers=headers)
+        response.encoding = 'utf-8'  # Указываем кодировку явно
         if not response.ok:
-            print(f"Ошибка при запросе страницы: {url}")
+            logger.error(f"Ошибка при запросе страницы: {url}")
             break
-        soup = BeautifulSoup(response.text, 'html.parser')
+        try:
+            content = response.content.decode('utf-8', 'ignore')
+        except UnicodeDecodeError as e:
+            logger.error(f"Ошибка декодирования контента: {e}")
+            break
+        soup = BeautifulSoup(content, 'html.parser')
         items = soup.select('div.b-product--wrap[data-b-for-cart]')
         if not items:
             break
@@ -96,7 +106,11 @@ def get_barbora_items_by_category(category, headers, user_agent):
             item_data = item_html.get('data-b-for-cart')
             if not item_data:
                 continue
-            item = json.loads(item_data)
+            try:
+                item = json.loads(item_data)
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка декодирования JSON: {e}")
+                continue
             product_name = item['title']
             product_price = round(float(item['price']), 2)
             product_image_url = item['image']
@@ -116,7 +130,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
 def get_all_rimi_items(db: Session, store, headers, user_agent):
     categories = get_rimi_categories(headers, user_agent)
     for category_index, category in enumerate(categories):
-        print(f"{category_index} - Парсинг Rimi категории: {category['title']}")
+        logger.info(f"{category_index} - Парсинг Rimi категории: {category['title']}")
         if not category['link']:
             continue
         category_items = get_rimi_items_by_category(category, headers, user_agent)
@@ -126,9 +140,10 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
 def get_rimi_categories(headers, user_agent):
     url = 'https://www.rimi.ee/epood/ee'
     if not is_allowed(url, user_agent):
-        print(f"Доступ к {url} запрещен согласно robots.txt")
+        logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
         return []
     response = requests.get(url, headers=headers)
+    response.encoding = 'utf-8'  # Указываем кодировку явно
     response.raise_for_status()
     soup = BeautifulSoup(response.text, 'html.parser')
     categories = soup.select('div.category-menu a')
@@ -146,13 +161,19 @@ def get_rimi_items_by_category(category, headers, user_agent):
         time.sleep(random_delay(3, 7))
         url = f"https://www.rimi.ee{category['link']}?page={current_page}&pageSize=99"
         if not is_allowed(url, user_agent):
-            print(f"Доступ к {url} запрещен согласно robots.txt")
+            logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
             break
         response = requests.get(url, headers=headers)
+        response.encoding = 'utf-8'  # Указываем кодировку явно
         if not response.ok:
-            print(f"Ошибка при запросе страницы: {url}")
+            logger.error(f"Ошибка при запросе страницы: {url}")
             break
-        soup = BeautifulSoup(response.text, 'html.parser')
+        try:
+            content = response.content.decode('utf-8', 'ignore')
+        except UnicodeDecodeError as e:
+            logger.error(f"Ошибка декодирования контента: {e}")
+            break
+        soup = BeautifulSoup(content, 'html.parser')
         items = soup.select('li.product-grid__item')
         if not items:
             break
@@ -161,11 +182,19 @@ def get_rimi_items_by_category(category, headers, user_agent):
             if not data_gtm:
                 continue
             item_data = data_gtm.get('data-gtm-eec-product')
-            item = json.loads(item_data)
+            try:
+                item = json.loads(item_data)
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка декодирования JSON: {e}")
+                continue
             product_name = item['name']
             euros = item_html.select_one('.price__integer').get_text(strip=True)
             cents = item_html.select_one('.price__decimal').get_text(strip=True)
-            product_price = round(float(f"{euros}.{cents}"), 2)
+            try:
+                product_price = round(float(f"{euros}.{cents}"), 2)
+            except ValueError as e:
+                logger.error(f"Ошибка конвертации цены: {e}")
+                continue
             product_image_url = item_html.select_one('img')['src']
             product_weight = item.get('measure')
             weight_value, unit_name = parse_weight(product_weight)

@@ -13,7 +13,7 @@ class StoreCreate(StoreBase):
 class Store(StoreBase):
     store_id: int
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True

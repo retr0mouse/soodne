@@ -4,10 +4,10 @@ from sqlalchemy.sql import func
 from app.database.database import Base
 
 class ProductMatchingLog(Base):
-    __tablename__ = "product_matching_log"
+    __tablename__ = "productmatchinglog"  # Соответствует таблице в БД
 
     log_id = Column(Integer, primary_key=True, index=True)
-    product_store_id = Column(Integer, ForeignKey("product_store_data.product_store_id"), nullable=False)
+    product_store_id = Column(Integer, ForeignKey("productstoredata.product_store_id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.product_id"), nullable=True)
     confidence_score = Column(DECIMAL(5, 2), nullable=True)
     matched_at = Column(TIMESTAMP(timezone=True), server_default=func.now())

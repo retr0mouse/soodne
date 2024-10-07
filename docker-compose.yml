@@ -1,6 +1,70 @@
 version: '3.8'
 
 services:
+  db:
+    image: postgres:13
+    container_name: db
+    environment:
+      - POSTGRES_USER=app_user
+      - POSTGRES_PASSWORD=secure_password
+      - POSTGRES_DB=app_user
+      - LANG=en_US.UTF-8
+      - LANGUAGE=en_US:en
+      - LC_ALL=en_US.UTF-8
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/initdb:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"  # Добавлено для проброса порта
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U app_user -d app_user" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    container_name: backend
+    environment:
+      - DATABASE_URL=postgresql://app_user:secure_password@db:5432/app_user
+      - LANG=en_US.UTF-8
+      - LANGUAGE=en_US:en
+      - LC_ALL=en_US.UTF-8
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUTF8=1
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  migrate:
+    build:
+      context: ./backend
+    container_name: migrate
+    command: >
+      bash -c "
+        until pg_isready -h db -p 5432 -U app_user; do
+          echo 'Waiting for PostgreSQL to be ready...';
+          sleep 1;
+        done;
+        alembic upgrade head;
+      "
+    environment:
+      - DATABASE_URL=postgresql://app_user:secure_password@db:5432/app_user
+      - LANG=en_US.UTF-8
+      - LANGUAGE=en_US:en
+      - LC_ALL=en_US.UTF-8
+      - PYTHONIOENCODING=utf-8
+      - PYTHONUTF8=1
+    depends_on:
+      - db
+    networks:
+      - app-network
+    restart: on-failure  # Автоматический перезапуск при сбое
+
   frontend:
     build:
       context: ./frontend
@@ -9,29 +73,6 @@ services:
       - PUBLIC_URL=/
     depends_on:
       - backend
-    networks:
-      - app-network
-
-  backend:
-    build:
-      context: ./backend
-    container_name: backend
-    environment:
-      - DATABASE_URL=postgresql://user:password@db:5432/your_db
-    depends_on:
-      - db
-    networks:
-      - app-network
-
-  db:
-    image: postgres:13
-    container_name: db
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: your_db
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
     networks:
       - app-network
 
@@ -44,18 +85,6 @@ services:
     depends_on:
       - frontend
       - backend
-    networks:
-      - app-network
-
-  migrate:
-    build:
-      context: ./backend
-    container_name: migrate
-    command: alembic upgrade head
-    environment:
-      - DATABASE_URL=postgresql://user:password@db:5432/your_db
-    depends_on:
-      - db
     networks:
       - app-network
 

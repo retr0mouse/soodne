@@ -4,7 +4,9 @@ import numpy as np
 import torch
 from PIL import Image
 from sentence_transformers import SentenceTransformer
-from torchvision import models, transforms
+from torchvision import models as torchvision_models
+from torchvision.models import ResNet18_Weights
+from torchvision import transforms
 from rapidfuzz import fuzz
 import requests
 from io import BytesIO
@@ -16,10 +18,12 @@ from app.services import product_matching_log_service
 
 logger = logging.getLogger(__name__)
 
+# Initialize models
 sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-image_model = models.resnet18(pretrained=True)
+image_model = torchvision_models.resnet18(weights=ResNet18_Weights.DEFAULT)
 image_model.eval()
 
+# Define preprocessing pipeline
 preprocess = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
