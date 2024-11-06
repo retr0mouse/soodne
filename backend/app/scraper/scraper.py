@@ -15,7 +15,7 @@ import random
 import time
 import json
 import urllib.robotparser
-from app.core.logger import logger  # Импортируем настроенный логгер
+from app.core.logger import logger
 
 def random_delay(min_seconds, max_seconds):
     return random.uniform(min_seconds, max_seconds)
@@ -29,46 +29,69 @@ def is_allowed(url, user_agent='Soodne/1.0'):
 
 def scrape_store_products():
     db: Session = SessionLocal()
-    user_agent = 'Soodne/1.0 (+Daniil Šarin <nuacho@tlu.ee>)'
+    user_agent = 'Soodne/1.0 (+Daniil %C5%A0arin <nuacho@tlu.ee>)'
     headers = {'User-Agent': user_agent}
 
-    barbora_store = store_service.get_by_name(db, name="Barbora")
-    if not barbora_store:
-        store_data = schemas.StoreCreate(
-            name="Barbora",
-            website_url="https://barbora.ee"
-        )
-        barbora_store = store_service.create(db, store=store_data)
-    get_all_barbora_items(db, barbora_store, headers, user_agent)
+    try:
+        logger.info("=== Starting scraping process ===")
+        
+        # Barbora scraping
+        logger.info("Starting Barbora scraping...")
+        barbora_store = store_service.get_by_name(db, name="Barbora")
+        if not barbora_store:
+            logger.info("Creating Barbora store in database...")
+            store_data = schemas.StoreCreate(
+                name="Barbora",
+                website_url="https://barbora.ee"
+            )
+            barbora_store = store_service.create(db, store=store_data)
+        get_all_barbora_items(db, barbora_store, headers, user_agent)
+        logger.info("Finished Barbora scraping")
 
-    rimi_store = store_service.get_by_name(db, name="Rimi")
-    if not rimi_store:
-        store_data = schemas.StoreCreate(
-            name="Rimi",
-            website_url="https://www.rimi.ee"
-        )
-        rimi_store = store_service.create(db, store=store_data)
-    get_all_rimi_items(db, rimi_store, headers, user_agent)
-
-    db.close()
+        # Rimi scraping
+        logger.info("Starting Rimi scraping...")
+        rimi_store = store_service.get_by_name(db, name="Rimi")
+        if not rimi_store:
+            logger.info("Creating Rimi store in database...")
+            store_data = schemas.StoreCreate(
+                name="Rimi",
+                website_url="https://www.rimi.ee"
+            )
+            rimi_store = store_service.create(db, store=store_data)
+        get_all_rimi_items(db, rimi_store, headers, user_agent)
+        logger.info("Finished Rimi scraping")
+        
+        logger.info("=== Scraping process completed successfully ===")
+    except Exception as e:
+        logger.error(f"=== Scraping process failed: {str(e)} ===")
+    finally:
+        db.close()
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
+    logger.info("Fetching Barbora categories...")
     categories = get_barbora_categories(headers, user_agent)
-    for category_index, category in enumerate(categories):
-        logger.info(f"{category_index} - Парсинг Barbora категории: {category['title']}")
+    logger.info(f"Found {len(categories)} Barbora categories")
+    
+    for category_index, category in enumerate(categories, 1):
+        logger.info(f"Processing Barbora category {category_index}/{len(categories)}: {category['title']}")
         if not category['link']:
+            logger.warning(f"Skipping category {category['title']} - no link available")
             continue
+            
         category_items = get_barbora_items_by_category(category, headers, user_agent)
-        for item in category_items:
+        logger.info(f"Found {len(category_items)} items in category {category['title']}")
+        
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
 
 def get_barbora_categories(headers, user_agent):
     url = 'https://barbora.ee'
     if not is_allowed(url, user_agent):
-        logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
+        logger.warning(f"Access to {url} is forbidden according to robots.txt")
         return []
     response = requests.get(url, headers=headers)
-    response.encoding = 'utf-8'  # Указываем кодировку явно
+    response.encoding = 'utf-8'
     response.raise_for_status()
     soup = BeautifulSoup(response.text, 'html.parser')
     categories = soup.select('li.b-categories-root-category > a')
@@ -86,19 +109,14 @@ def get_barbora_items_by_category(category, headers, user_agent):
         time.sleep(random_delay(3, 7))
         url = f"https://barbora.ee{category['link']}?page={current_page}"
         if not is_allowed(url, user_agent):
-            logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
+            logger.warning(f"Access to {url} is forbidden according to robots.txt")
             break
         response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'  # Указываем кодировку явно
+        response.encoding = 'utf-8'
         if not response.ok:
-            logger.error(f"Ошибка при запросе страницы: {url}")
+            logger.error(f"Error requesting page: {url}")
             break
-        try:
-            content = response.content.decode('utf-8', 'ignore')
-        except UnicodeDecodeError as e:
-            logger.error(f"Ошибка декодирования контента: {e}")
-            break
-        soup = BeautifulSoup(content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
         items = soup.select('div.b-product--wrap[data-b-for-cart]')
         if not items:
             break
@@ -109,7 +127,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
             try:
                 item = json.loads(item_data)
             except json.JSONDecodeError as e:
-                logger.error(f"Ошибка декодирования JSON: {e}")
+                logger.error(f"JSON decoding error: {e}")
                 continue
             product_name = item['title']
             product_price = round(float(item['price']), 2)
@@ -128,22 +146,30 @@ def get_barbora_items_by_category(category, headers, user_agent):
     return result_products
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
+    logger.info("Fetching Rimi categories...")
     categories = get_rimi_categories(headers, user_agent)
-    for category_index, category in enumerate(categories):
-        logger.info(f"{category_index} - Парсинг Rimi категории: {category['title']}")
+    logger.info(f"Found {len(categories)} Rimi categories")
+    
+    for category_index, category in enumerate(categories, 1):
+        logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
         if not category['link']:
+            logger.warning(f"Skipping category {category['title']} - no link available")
             continue
+            
         category_items = get_rimi_items_by_category(category, headers, user_agent)
-        for item in category_items:
+        logger.info(f"Found {len(category_items)} items in category {category['title']}")
+        
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
 
 def get_rimi_categories(headers, user_agent):
     url = 'https://www.rimi.ee/epood/ee'
     if not is_allowed(url, user_agent):
-        logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
+        logger.warning(f"Access to {url} is forbidden according to robots.txt")
         return []
     response = requests.get(url, headers=headers)
-    response.encoding = 'utf-8'  # Указываем кодировку явно
+    response.encoding = 'utf-8'
     response.raise_for_status()
     soup = BeautifulSoup(response.text, 'html.parser')
     categories = soup.select('div.category-menu a')
@@ -161,19 +187,14 @@ def get_rimi_items_by_category(category, headers, user_agent):
         time.sleep(random_delay(3, 7))
         url = f"https://www.rimi.ee{category['link']}?page={current_page}&pageSize=99"
         if not is_allowed(url, user_agent):
-            logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
+            logger.warning(f"Access to {url} is forbidden according to robots.txt")
             break
         response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'  # Указываем кодировку явно
+        response.encoding = 'utf-8'
         if not response.ok:
-            logger.error(f"Ошибка при запросе страницы: {url}")
+            logger.error(f"Error requesting page: {url}")
             break
-        try:
-            content = response.content.decode('utf-8', 'ignore')
-        except UnicodeDecodeError as e:
-            logger.error(f"Ошибка декодирования контента: {e}")
-            break
-        soup = BeautifulSoup(content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')
         items = soup.select('li.product-grid__item')
         if not items:
             break
@@ -185,7 +206,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
             try:
                 item = json.loads(item_data)
             except json.JSONDecodeError as e:
-                logger.error(f"Ошибка декодирования JSON: {e}")
+                logger.error(f"JSON decoding error: {e}")
                 continue
             product_name = item['name']
             euros = item_html.select_one('.price__integer').get_text(strip=True)
@@ -193,7 +214,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
             try:
                 product_price = round(float(f"{euros}.{cents}"), 2)
             except ValueError as e:
-                logger.error(f"Ошибка конвертации цены: {e}")
+                logger.error(f"Price conversion error: {e}")
                 continue
             product_image_url = item_html.select_one('img')['src']
             product_weight = item.get('measure')

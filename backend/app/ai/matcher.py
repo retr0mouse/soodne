@@ -18,12 +18,10 @@ from app.services import product_matching_log_service
 
 logger = logging.getLogger(__name__)
 
-# Initialize models
 sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
 image_model = torchvision_models.resnet18(weights=ResNet18_Weights.DEFAULT)
 image_model.eval()
 
-# Define preprocessing pipeline
 preprocess = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),

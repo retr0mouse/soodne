@@ -7,8 +7,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="API для Сравнения Цен на Продукты",
-    description="API для сравнения цен на продукты в различных магазинах",
+    title="Product Price Comparison API",
+    description="API for comparing product prices across different stores",
     version="1.0.0",
 )
 
@@ -16,18 +16,18 @@ app.include_router(api_router, prefix="/api/v1")
 
 @app.on_event("startup")
 def on_startup():
-    logger.info("Запуск приложения и планировщика...")
+    logger.info("Starting application and scheduler...")
     if not scheduler.running:
         scheduler.start()
-        logger.info("Планировщик запущен.")
+        logger.info("Scheduler started.")
     else:
-        logger.warning("Планировщик уже запущен.")
+        logger.warning("Scheduler is already running.")
 
 @app.on_event("shutdown")
 def on_shutdown():
-    logger.info("Завершение работы приложения и планировщика...")
+    logger.info("Shutting down application and scheduler...")
     if scheduler.running:
         scheduler.shutdown()
-        logger.info("Планировщик остановлен.")
+        logger.info("Scheduler stopped.")
     else:
-        logger.warning("Планировщик не был запущен.")
+        logger.warning("Scheduler was not running.")

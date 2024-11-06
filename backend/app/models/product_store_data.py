@@ -7,7 +7,7 @@ from app.database.database import Base
 from .enums import MatchingStatusEnum
 
 class ProductStoreData(Base):
-    __tablename__ = "productstoredata"  # Соответствует таблице в БД
+    __tablename__ = "productstoredata"
 
     product_store_id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False)

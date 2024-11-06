@@ -4,7 +4,7 @@ from sqlalchemy.sql import func
 from app.database.database import Base
 
 class ProductPriceHistory(Base):
-    __tablename__ = "productpricehistory"  # Соответствует таблице в БД
+    __tablename__ = "productpricehistory"
 
     price_history_id = Column(Integer, primary_key=True, index=True)
     product_store_id = Column(Integer, ForeignKey("productstoredata.product_store_id", ondelete="CASCADE"), nullable=False)

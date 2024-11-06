@@ -4,7 +4,7 @@ from sqlalchemy.sql import func
 from app.database.database import Base
 
 class ProductMatchingLog(Base):
-    __tablename__ = "productmatchinglog"  # Соответствует таблице в БД
+    __tablename__ = "productmatchinglog"
 
     log_id = Column(Integer, primary_key=True, index=True)
     product_store_id = Column(Integer, ForeignKey("productstoredata.product_store_id"), nullable=False)
