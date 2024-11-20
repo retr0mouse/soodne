@@ -2,7 +2,7 @@
 
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { Category, GroceriesApi, Product } from '../../../../api/GroceriesApi';
+import { Category, GroceriesApi, Product } from '../../../api/GroceriesApi';
 import AllProducts from '../../components/AllProducts';
 
 export default function CategoryPage() {
