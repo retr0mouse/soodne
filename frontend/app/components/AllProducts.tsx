@@ -1,5 +1,5 @@
 'use client'
-import { Product } from "../../../api/GroceriesApi";
+import { Product } from "../../api/GroceriesApi";
 import { useCart } from '../context/CartContext';
 
 export default function AllProducts({ products }: { products: Product[] }) {
