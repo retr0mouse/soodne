@@ -1,7 +1,7 @@
 'use client'
 
 import React, { createContext, useContext, useState, ReactNode } from 'react';
-import { Product } from '../../../api/GroceriesApi';
+import { Product } from '../../api/GroceriesApi';
 
 interface CartItem {
     product: Product;

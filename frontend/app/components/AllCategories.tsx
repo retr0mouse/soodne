@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import Image from 'next/image';
-import { Category } from '../../../api/GroceriesApi';
+import { Category } from '../../api/GroceriesApi';
 
 export default function AllCategories({ categories }: { categories: Category[] }) {
     return (
