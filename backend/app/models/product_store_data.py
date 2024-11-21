@@ -2,7 +2,7 @@ from sqlalchemy import (
     Column, Integer, DECIMAL, ForeignKey, String, Text, TIMESTAMP, Enum, JSON
 )
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy import func
 from app.database.database import Base
 from .enums import MatchingStatusEnum
 
