@@ -26,29 +26,13 @@ services:
     container_name: backend
     environment:
       - DATABASE_URL=postgresql://app_user:secure_password@db:5432/app_user
+    ports:
+      - "8000:8000"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - app-network
-
-  migrate:
-    build: ./backend
-    container_name: migrate
-    command: >
-      bash -c "
-        until pg_isready -h db -p 5432 -U app_user; do
-          echo 'Waiting for PostgreSQL...';
-          sleep 1;
-        done;
-        alembic upgrade head;
-      "
-    environment:
-      - DATABASE_URL=postgresql://app_user:secure_password@db:5432/app_user
-    depends_on:
-      - db
-    networks:
-      - app-network
-    restart: on-failure
 
   frontend:
     build: ./frontend
