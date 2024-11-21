@@ -23,6 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
+from urllib.parse import urljoin
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -81,15 +82,17 @@ def process_store(db: Session, store):
         'Connection': 'keep-alive',
     }
 
-    # Barbora scraping
-    logger.info("Starting Barbora scraping...")
-    get_all_barbora_items(db, store, headers, user_agent)
-    logger.info("Finished Barbora scraping")
-
     # Rimi scraping
     logger.info("Starting Rimi scraping...")
     get_all_rimi_items(db, store, headers, user_agent)
     logger.info("Finished Rimi scraping")
+
+
+    # Barbora scraping
+    #logger.info("Starting Barbora scraping...")
+    #get_all_barbora_items(db, store, headers, user_agent)
+    #logger.info("Finished Barbora scraping")
+
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
@@ -365,46 +368,98 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10)
+)
 def get_rimi_categories(headers, user_agent):
-    url = 'https://www.rimi.ee/epood/ee'
-    if not is_allowed(url, user_agent):
-        logger.warning(f"Access to {url} is forbidden according to robots.txt")
-        return []
-        
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    categories = []
+    driver = None
+    
     try:
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
-        response.raise_for_status()
+        logger.debug("Initializing Chrome driver...")
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        logger.debug("Chrome driver initialized successfully")
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        url = 'https://www.rimi.ee/epood/ee'
+        logger.debug(f"Navigating to URL: {url}")
+        driver.get(url)
         
-        categories = soup.select('.main-navigation__list > .main-navigation__item')
+        time.sleep(10)
         
-        result_categories = []
-        for category in categories:
-            link_elem = category.select_one('a.main-navigation__link')
-            if not link_elem:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".category-menu button.trigger"))
+        )
+        
+        category_elements = driver.find_elements(By.CSS_SELECTOR, ".category-menu button.trigger")
+        logger.debug(f"Found {len(category_elements)} category elements")
+        
+        for element in category_elements:
+            try:
+                href = element.get_attribute('href')
+                name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
+                
+                if href and name:
+                    category_id = href.split('/c/')[-1] if '/c/' in href else None
+                    
+                    if category_id:
+                        categories.append({
+                            'title': name,
+                            'link': href,
+                            'id': category_id.strip()
+                        })
+                        logger.debug(f"Added category: {name} (ID: {category_id})")
+            except Exception as e:
+                logger.warning(f"Error processing category element: {str(e)}")
                 continue
-                
-            title = link_elem.text.strip()
-            link = link_elem.get('href', '')
+
+        if not categories:
+            logger.debug("Trying JavaScript method to get categories")
+            categories_js = driver.execute_script("""
+                return Array.from(document.querySelectorAll('.category-menu button.trigger')).map(el => {
+                    const href = el.getAttribute('href');
+                    const categoryId = href ? href.split('/c/').pop().trim() : null;
+                    return {
+                        title: el.querySelector('span.name').textContent.trim(),
+                        link: href,
+                        id: categoryId
+                    };
+                }).filter(cat => cat.title && cat.link && cat.id);
+            """)
             
-            if title and link:
-                result_categories.append({
-                    'title': title,
-                    'link': link
-                })
-                
-        return result_categories
+            if categories_js:
+                categories = categories_js
+                logger.debug(f"Found {len(categories)} categories using JavaScript")
         
-    except (requests.RequestException, Exception) as e:
-        logger.error(f"Error getting Rimi categories: {str(e)}")
+        return categories
+        
+    except Exception as e:
+        logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
         return []
+        
+    finally:
+        try:
+            if driver:
+                driver.quit()
+                logger.debug("Chrome driver closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing driver: {str(e)}")
 
 def get_rimi_items_by_category(category, headers, user_agent):
     result_products = []
-    
-    url = f"https://www.rimi.ee/epood/ee/products/{category['id']}?pageSize=100"
+    url = f"https://www.rimi.ee{category['link']}?pageSize=100"
     
     if not is_allowed(url, user_agent):
         logger.warning(f"Access to {url} is forbidden by robots.txt") 
@@ -550,7 +605,7 @@ def parse_weight(weight_str):
     try:
         value = float(parts[0].replace(',', '.'))
         unit = parts[1].lower()
-        return value, unit
+        return value, unit 
     except ValueError:
         return None, None
 
