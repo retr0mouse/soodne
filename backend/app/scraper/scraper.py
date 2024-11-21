@@ -1,5 +1,3 @@
-# app/scraper/scrape_store_products.py
-
 import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -16,8 +14,17 @@ import time
 import json
 import urllib.robotparser
 from app.core.logger import setup_logger
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = setup_logger("scraper")
+logger.setLevel("DEBUG")
 
 def random_delay(min_seconds, max_seconds):
     return random.uniform(min_seconds, max_seconds)
@@ -139,50 +146,112 @@ def get_barbora_categories(headers, user_agent):
         logger.error(f"Error getting Barbora categories: {str(e)}")
         return []
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10)
+)
 def get_barbora_items_by_category(category, headers, user_agent):
-    result_products = []
-    current_page = 1
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
     
-    while True:
-        time.sleep(random_delay(3, 7))
-        url = f"https://barbora.ee{category['link']}?page={current_page}&pageSize=48"
+    result_products = []
+    
+    try:
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        logger.debug("Chrome driver successfully initialized")
         
-        if not is_allowed(url, user_agent):
-            logger.warning(f"Доступ к {url} запрещен согласно robots.txt")
-            break
-            
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
+        url = f"https://barbora.ee{category['link']}"
+        logger.debug(f"Loading page: {url}")
         
-        if not response.ok:
-            logger.error(f"Ошибка при запросе страницы: {url}")
-            break
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('div.product-item')
-        
-        if not items:
-            break
-            
-        for item_html in items:
+        try:
+            driver.get(url)
             try:
-                name = item_html.select_one('.product-name').get_text(strip=True)
-                price = item_html.select_one('.product-price').get_text(strip=True)
-                image = item_html.select_one('img')['src']
-                
-                result_products.append({
-                    'name': name,
-                    'price': price,
-                    'image': image,
-                    'category': category['title']
-                })
-                
-            except (AttributeError, KeyError) as e:
-                logger.error(f"Ошибка при обработке товара: {e}")
-                continue
-                
-        current_page += 1
-        
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                )
+                driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+            except Exception as e:
+                logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
+            
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid^='product-card-']"))
+            )
+            
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(5)
+            
+            products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
+            logger.debug(f"Found {len(products)} products on page")
+            
+            for product in products:
+                try:
+                    name = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text
+                    price_text = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-price-']").text
+                    
+                    price_text = price_text.split('\n')
+                    price_parts = []
+                    for part in price_text:
+                        if part.replace('.', '').isdigit():
+                            price_parts.append(part)
+                        if len(price_parts) == 2:
+                            break
+                    
+                    if len(price_parts) == 2:
+                        price = float(f"{price_parts[0]}.{price_parts[1]}")
+                    else:
+                        continue
+                    
+                    try:
+                        img_element = product.find_element(By.CSS_SELECTOR, "img")
+                        image_url = img_element.get_attribute("src")
+                    except:
+                        image_url = "https://barbora.ee/Assets/Images/logo-square.png"
+                        logger.warning(f"Image not found for product: {name}")
+                    
+                    result_products.append({
+                        'name': name,
+                        'price': price,
+                        'image': image_url
+                    })
+                    
+                except Exception as e:
+                    logger.warning(f"Error parsing product: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error loading page: {str(e)}")
+            if hasattr(e, 'msg'):
+                logger.error(f"Error message: {e.msg}")
+            if hasattr(e, 'screen'):
+                logger.error(f"Screenshot available: {bool(e.screen)}")
+            try:
+                logger.debug(f"Current page source: {driver.page_source[:2000]}...")
+            except:
+                pass
+            raise
+            
+    except Exception as e:
+        logger.error(f"Critical error while working with Chrome: {str(e)}")
+        if hasattr(e, 'msg'):
+            logger.error(f"Error message: {e.msg}")
+    finally:
+        try:
+            if 'driver' in locals():
+                driver.quit()
+                logger.debug("Chrome driver successfully closed")
+        except Exception as e:
+            logger.error(f"Error while closing driver: {str(e)}")
+            
     return result_products
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
@@ -248,14 +317,14 @@ def get_rimi_items_by_category(category, headers, user_agent):
         url = f"https://www.rimi.ee/epood/ee/products/{category['id']}?page={current_page}&pageSize=100"
         
         if not is_allowed(url, user_agent):
-            logger.warning(f"Доступ к {url} запрещен согласно robots.txt") 
+            logger.warning(f"Access to {url} is forbidden by robots.txt") 
             break
             
         response = requests.get(url, headers=headers)
         response.encoding = 'utf-8'
         
         if not response.ok:
-            logger.error(f"Ошибка при запросе страницы: {url}")
+            logger.error(f"Error requesting page: {url}")
             break
             
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -299,7 +368,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
                 })
                 
             except (KeyError, json.JSONDecodeError) as e:
-                logger.error(f"Ошибка при обработке товара: {e}")
+                logger.error(f"Error processing product: {e}")
                 continue
                 
         current_page += 1
@@ -366,6 +435,63 @@ def get_conversion_factor(unit_name):
         'l': 1000,
     }
     return unit_conversions.get(unit_name, 1)
+
+def initialize_chrome_driver():
+    chrome_options = webdriver.ChromeOptions()
+    chrome_options.add_argument('--headless')  # Запуск в фоновом режиме
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')  # Отключаем GPU
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    
+    driver = webdriver.Chrome(options=chrome_options)
+    driver.set_page_load_timeout(30)  # Увеличиваем timeout загрузки страницы
+    return driver
+
+def load_page(driver, url):
+    try:
+        driver.get(url)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "tw-flex-shrink-0"))
+        )
+        return True
+    except TimeoutException:
+        logger.error("Timeout waiting for page load")
+        return False
+    except WebDriverException as e:
+        logger.error(f"Error loading page: {e}")
+        return False
+
+def scrape_barbora_category(driver, category_url):
+    try:
+        if not load_page(driver, category_url):
+            return []
+            
+        # Даем странице время полностью загрузиться
+        time.sleep(5)
+        
+        # Получаем список товаров
+        items = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
+        
+        products = []
+        for item in items:
+            try:
+                product = {
+                    'name': item.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text,
+                    'price': item.find_element(By.CSS_SELECTOR, "[id^='fti-product-price-']").text,
+                    # Добавьте другие нужные поля
+                }
+                products.append(product)
+            except Exception as e:
+                logger.warning(f"Error parsing product: {e}")
+                continue
+                
+        return products
+        
+    except Exception as e:
+        logger.error(f"Error scraping category: {e}")
+        return []
 
 if __name__ == "__main__":
     scrape_store_products()
