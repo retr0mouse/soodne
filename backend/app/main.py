@@ -1,10 +1,9 @@
-import logging
 from fastapi import FastAPI
 from app.api.v1.api import api_router
 from app.core.scheduler import scheduler
+from app.core.logger import setup_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger("main")
 
 app = FastAPI(
     title="Product Price Comparison API",
@@ -15,19 +14,19 @@ app = FastAPI(
 app.include_router(api_router, prefix="/api/v1")
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     logger.info("Starting application and scheduler...")
     if not scheduler.running:
         scheduler.start()
-        logger.info("Scheduler started.")
+        logger.info("Scheduler started")
     else:
-        logger.warning("Scheduler is already running.")
+        logger.warning("Scheduler is already running")
 
 @app.on_event("shutdown")
-def on_shutdown():
+async def on_shutdown():
     logger.info("Shutting down application and scheduler...")
     if scheduler.running:
         scheduler.shutdown()
-        logger.info("Scheduler stopped.")
+        logger.info("Scheduler stopped")
     else:
-        logger.warning("Scheduler was not running.")
+        logger.warning("Scheduler was not running")
