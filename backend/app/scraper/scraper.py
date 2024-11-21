@@ -178,48 +178,118 @@ def get_barbora_items_by_category(category, headers, user_agent):
             
             try:
                 driver.get(url)
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                    )
+                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+                except Exception as e:
+                    logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
                 
-                # Ждем загрузку JavaScript-данных
                 WebDriverWait(driver, 20).until(
-                    lambda d: d.execute_script("return window.b_data") is not None
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid^='product-card-']"))
                 )
                 
-                # Получаем данные о продуктах
-                products_data = driver.execute_script("""
-                    return Array.from(document.querySelectorAll('[data-testid^="product-card-"]')).map(card => {
-                        const priceElement = card.querySelector('.b-product-price-current-number');
-                        const nameElement = card.querySelector('.b-product-title');
-                        const imageElement = card.querySelector('.b-product-image');
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(5)
+                
+                products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
+                logger.debug(f"Raw products found on page {page}: {len(products)}")
+                
+                valid_products_count = 0
+                for product in products:
+                    try:
+                        name = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text
                         
-                        return {
-                            name: nameElement ? nameElement.textContent.trim() : '',
-                            price: priceElement ? parseFloat(priceElement.textContent.replace('€', '').replace(',', '.').trim()) : 0,
-                            image: imageElement ? imageElement.src : 'https://barbora.ee/Assets/Images/logo-square.png'
-                        };
-                    });
-                """)
+                        weight_value, unit_name = parse_product_details(name)
+                        
+                        if not product.is_displayed():
+                            logger.debug("Product not displayed, skipping")
+                            continue
+                            
+                        driver.execute_script("arguments[0].scrollIntoView(true);", product)
+                        time.sleep(1)
+                        
+                        price_container = None
+                        price_selectors = [
+                            "[id^='fti-product-price-']",
+                            "[data-testid='promoColouredContainer']",
+                            "div.tw-border-neutral-200"
+                        ]
+                        
+                        for selector in price_selectors:
+                            try:
+                                price_container = product.find_element(By.CSS_SELECTOR, selector)
+                                if price_container:
+                                    break
+                            except NoSuchElementException:
+                                continue
+                        
+                        if not price_container:
+                            logger.warning(f"Price container not found for product: {name}")
+                            continue
+                        
+                        price_elements = price_container.find_elements(By.CSS_SELECTOR, "span.tw-font-bold, span.tw-text-xl, span.tw-text-sm")
+                        price_text = [elem.text for elem in price_elements if elem.text.strip()]
+                        
+                        price = None
+                        for i in range(len(price_text)-1):
+                            try:
+                                euros = price_text[i].replace(',', '.')
+                                cents = price_text[i+1].replace(',', '.')
+                                if euros.replace('.', '').isdigit() and cents.replace('.', '').isdigit():
+                                    price = float(f"{euros}.{cents}")
+                                    break
+                            except (ValueError, IndexError):
+                                continue
+                        
+                        if not price:
+                            logger.warning(f"Could not parse price for product: {name}")
+                            continue
+                        
+                        try:
+                            img_element = product.find_element(By.CSS_SELECTOR, "img")
+                            image_url = img_element.get_attribute("src")
+                        except:
+                            image_url = "https://barbora.ee/Assets/Images/logo-square.png"
+                            logger.warning(f"Image not found for product: {name}")
+                        
+                        result_products.append({
+                            'name': name,
+                            'price': price,
+                            'image': image_url,
+                            'weight_value': weight_value,
+                            'unit_name': unit_name
+                        })
+                        valid_products_count += 1
+                        
+                        logger.debug(f"""
+                            Processing raw item data:
+                            - Name: {name}
+                            - Price: {price}
+                            - Image: {image_url}
+                            - Weight Value: {weight_value}
+                            - Unit Name: {unit_name}
+                        """)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error parsing product: {str(e)}")
+                        continue
                 
-                logger.debug(f"Found {len(products_data)} products in JavaScript data")
+                logger.debug(f"Valid products added from page {page}: {valid_products_count}")
+                logger.debug(f"Current total products: {len(result_products)}")
                 
-                # Если продуктов нет, прерываем цикл
-                if not products_data:
+                if valid_products_count == 0:
                     logger.info(f"No more products found on page {page}, stopping pagination")
                     break
-                
-                # Добавляем найденные продукты
-                for product_data in products_data:
-                    if product_data['name'] and product_data['price']:
-                        result_products.append(product_data)
-                        
-                page += 1
-                time.sleep(random_delay(2, 4))  # Задержка между страницами
                     
+                page += 1
+                time.sleep(random_delay(2, 4))
+                
             except Exception as e:
                 logger.error(f"Error loading page: {str(e)}")
                 break
-            
-    except Exception as e:
-        logger.error(f"Critical error while working with Chrome: {str(e)}")
+                
     finally:
         try:
             if 'driver' in locals():
@@ -228,7 +298,54 @@ def get_barbora_items_by_category(category, headers, user_agent):
         except Exception as e:
             logger.error(f"Error while closing driver: {str(e)}")
             
+    logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
+
+def parse_product_details(name):
+    weight_value = None
+    unit_name = None
+    
+    weight_patterns = [
+        r'(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|tk|tk\/pk|pk)',
+        r'(\d+(?:[.,]\d+)?)(g|kg|ml|l)(?!\w)',
+        r'(?:^|,\s*)(\d+)?\s*,?\s*(kg)$',
+        r',\s*(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|tk|tk\/pk|pk)',
+        r'(\d+)\s*kl\s*\.,\s*(kg)',
+        r'(?:^|,\s*)(\d+)?\s*(tk)(?:\s|$)',
+    ]
+    
+    for pattern in weight_patterns:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            if len(match.groups()) == 2:
+                weight_str = match.group(1)
+                unit_name = match.group(2).lower()
+            else:
+                weight_str = '1'
+                unit_name = match.group(1).lower()
+            
+            unit_mapping = {
+                'g': 'g',
+                'kg': 'kg',
+                'ml': 'ml',
+                'l': 'l',
+                'tk': 'pc',
+                'tk/pk': 'pc',
+                'pk': 'pack'
+            }
+            unit_name = unit_mapping.get(unit_name, unit_name)
+            
+            try:
+                if weight_str:
+                    weight_value = float(weight_str.replace(',', '.'))
+                else:
+                    weight_value = 1.0
+            except (ValueError, TypeError):
+                continue
+            
+            break
+    
+    return weight_value, unit_name
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Rimi categories...")
@@ -344,7 +461,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
     return result_products
 
 def process_item(db: Session, store, item):
-    # Логируем исходные данные товара
     logger.debug(f"""
     Processing raw item data:
     - Name: {item['name']}
@@ -358,7 +474,6 @@ def process_item(db: Session, store, item):
     weight_value = item.get('weight_value')
     unit_name = item.get('unit_name')
     
-    # Обработка единиц измерения
     if weight_value and unit_name:
         unit = unit_service.get_by_name(db, name=unit_name)
         if not unit:
@@ -372,7 +487,6 @@ def process_item(db: Session, store, item):
         unit = None
         logger.debug("No unit information available for this product")
 
-    # Создание продукта
     product_data = schemas.ProductCreate(
         name=item['name'],
         image_url=item['image'],
@@ -380,7 +494,6 @@ def process_item(db: Session, store, item):
         unit_id=unit.unit_id if unit else None
     )
     
-    # Проверка существующего продукта
     product = product_service.get_by_name_and_unit(db, name=item['name'], unit_id=unit.unit_id if unit else None)
     if not product:
         product = product_service.create(db, product=product_data)
@@ -388,7 +501,6 @@ def process_item(db: Session, store, item):
     else:
         logger.debug(f"Found existing product: {product.name} (ID: {product.product_id})")
 
-    # Создание данных о товаре в магазине
     psd_data = schemas.ProductStoreDataCreate(
         product_id=product.product_id,
         store_id=store.store_id,
@@ -399,7 +511,6 @@ def process_item(db: Session, store, item):
         store_unit_id=unit.unit_id if unit else None
     )
 
-    # Обновление или создание записи
     existing_psd = product_store_data_service.get_by_product_and_store(
         db, 
         product_id=product.product_id, 
@@ -428,7 +539,7 @@ def process_item(db: Session, store, item):
         - Product ID: {new_psd.product_id}
         """)
 
-    logger.debug("=" * 50)  # Разделитель между товарами
+    logger.debug("=" * 50)
 
 def parse_weight(weight_str):
     if not weight_str:
