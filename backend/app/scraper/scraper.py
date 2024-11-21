@@ -20,8 +20,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
 from tenacity import retry, stop_after_attempt, wait_exponential
+import re
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -163,6 +164,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
     result_products = []
+    page = 1
     
     try:
         service = Service()
@@ -170,80 +172,54 @@ def get_barbora_items_by_category(category, headers, user_agent):
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         logger.debug("Chrome driver successfully initialized")
         
-        url = f"https://barbora.ee{category['link']}"
-        logger.debug(f"Loading page: {url}")
-        
-        try:
-            driver.get(url)
+        while True:
+            url = f"https://barbora.ee{category['link']}?page={page}"
+            logger.debug(f"Loading page: {url}")
+            
             try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                driver.get(url)
+                
+                # Ждем загрузку JavaScript-данных
+                WebDriverWait(driver, 20).until(
+                    lambda d: d.execute_script("return window.b_data") is not None
                 )
-                driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+                
+                # Получаем данные о продуктах
+                products_data = driver.execute_script("""
+                    return Array.from(document.querySelectorAll('[data-testid^="product-card-"]')).map(card => {
+                        const priceElement = card.querySelector('.b-product-price-current-number');
+                        const nameElement = card.querySelector('.b-product-title');
+                        const imageElement = card.querySelector('.b-product-image');
+                        
+                        return {
+                            name: nameElement ? nameElement.textContent.trim() : '',
+                            price: priceElement ? parseFloat(priceElement.textContent.replace('€', '').replace(',', '.').trim()) : 0,
+                            image: imageElement ? imageElement.src : 'https://barbora.ee/Assets/Images/logo-square.png'
+                        };
+                    });
+                """)
+                
+                logger.debug(f"Found {len(products_data)} products in JavaScript data")
+                
+                # Если продуктов нет, прерываем цикл
+                if not products_data:
+                    logger.info(f"No more products found on page {page}, stopping pagination")
+                    break
+                
+                # Добавляем найденные продукты
+                for product_data in products_data:
+                    if product_data['name'] and product_data['price']:
+                        result_products.append(product_data)
+                        
+                page += 1
+                time.sleep(random_delay(2, 4))  # Задержка между страницами
+                    
             except Exception as e:
-                logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
-            
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid^='product-card-']"))
-            )
-            
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(5)
-            
-            products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
-            logger.debug(f"Found {len(products)} products on page")
-            
-            for product in products:
-                try:
-                    name = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text
-                    price_text = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-price-']").text
-                    
-                    price_text = price_text.split('\n')
-                    price_parts = []
-                    for part in price_text:
-                        if part.replace('.', '').isdigit():
-                            price_parts.append(part)
-                        if len(price_parts) == 2:
-                            break
-                    
-                    if len(price_parts) == 2:
-                        price = float(f"{price_parts[0]}.{price_parts[1]}")
-                    else:
-                        continue
-                    
-                    try:
-                        img_element = product.find_element(By.CSS_SELECTOR, "img")
-                        image_url = img_element.get_attribute("src")
-                    except:
-                        image_url = "https://barbora.ee/Assets/Images/logo-square.png"
-                        logger.warning(f"Image not found for product: {name}")
-                    
-                    result_products.append({
-                        'name': name,
-                        'price': price,
-                        'image': image_url
-                    })
-                    
-                except Exception as e:
-                    logger.warning(f"Error parsing product: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Error loading page: {str(e)}")
-            if hasattr(e, 'msg'):
-                logger.error(f"Error message: {e.msg}")
-            if hasattr(e, 'screen'):
-                logger.error(f"Screenshot available: {bool(e.screen)}")
-            try:
-                logger.debug(f"Current page source: {driver.page_source[:2000]}...")
-            except:
-                pass
-            raise
+                logger.error(f"Error loading page: {str(e)}")
+                break
             
     except Exception as e:
         logger.error(f"Critical error while working with Chrome: {str(e)}")
-        if hasattr(e, 'msg'):
-            logger.error(f"Error message: {e.msg}")
     finally:
         try:
             if 'driver' in locals():
@@ -310,74 +286,79 @@ def get_rimi_categories(headers, user_agent):
 
 def get_rimi_items_by_category(category, headers, user_agent):
     result_products = []
-    current_page = 1
     
-    while True:
-        time.sleep(random_delay(3, 7))
-        url = f"https://www.rimi.ee/epood/ee/products/{category['id']}?page={current_page}&pageSize=100"
+    url = f"https://www.rimi.ee/epood/ee/products/{category['id']}?pageSize=100"
+    
+    if not is_allowed(url, user_agent):
+        logger.warning(f"Access to {url} is forbidden by robots.txt") 
+        return result_products
         
-        if not is_allowed(url, user_agent):
-            logger.warning(f"Access to {url} is forbidden by robots.txt") 
-            break
-            
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
+    response = requests.get(url, headers=headers)
+    response.encoding = 'utf-8'
+    
+    if not response.ok:
+        logger.error(f"Error requesting page: {url}")
+        return result_products
         
-        if not response.ok:
-            logger.error(f"Error requesting page: {url}")
-            break
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('li.product-grid__item')
-        
-        if not items:
-            break
-            
-        for item_html in items:
-            try:
-                data_gtm = item_html.select_one('div[data-gtm-eec-product]')
-                if not data_gtm:
-                    continue
-                    
-                item_data = data_gtm.get('data-gtm-eec-product')
-                item = json.loads(item_data)
-                
-                price_int = item_html.select_one('.price__integer')
-                price_dec = item_html.select_one('.price__decimal')
-                
-                if not price_int or not price_dec:
-                    continue
-                    
-                euros = price_int.get_text(strip=True)
-                cents = price_dec.get_text(strip=True)
-                
-                try:
-                    product_price = round(float(f"{euros}.{cents}"), 2)
-                except ValueError:
-                    continue
-                    
-                weight_value, unit_name = parse_weight(item.get('measure', ''))
-                
-                result_products.append({
-                    'name': item['name'],
-                    'price': product_price,
-                    'image': item_html.select_one('img')['src'],
-                    'category': item['category'],
-                    'weight_value': weight_value,
-                    'unit_name': unit_name
-                })
-                
-            except (KeyError, json.JSONDecodeError) as e:
-                logger.error(f"Error processing product: {e}")
+    soup = BeautifulSoup(response.text, 'html.parser')
+    items = soup.select('li.product-grid__item')
+    
+    for item_html in items:
+        try:
+            data_gtm = item_html.select_one('div[data-gtm-eec-product]')
+            if not data_gtm:
                 continue
                 
-        current_page += 1
-        
+            item_data = data_gtm.get('data-gtm-eec-product')
+            item = json.loads(item_data)
+            
+            price_int = item_html.select_one('.price__integer')
+            price_dec = item_html.select_one('.price__decimal')
+            
+            if not price_int or not price_dec:
+                continue
+                
+            euros = price_int.get_text(strip=True)
+            cents = price_dec.get_text(strip=True)
+            
+            try:
+                product_price = round(float(f"{euros}.{cents}"), 2)
+            except ValueError:
+                continue
+                
+            weight_value, unit_name = parse_weight(item.get('measure', ''))
+            
+            result_products.append({
+                'name': item['name'],
+                'price': product_price,
+                'image': item_html.select_one('img')['src'],
+                'category': item['category'],
+                'weight_value': weight_value,
+                'unit_name': unit_name
+            })
+            
+        except (KeyError, json.JSONDecodeError) as e:
+            logger.error(f"Error processing product: {e}")
+            continue
+            
     return result_products
 
 def process_item(db: Session, store, item):
+    # Логируем исходные данные товара
+    logger.debug(f"""
+    Processing raw item data:
+    - Name: {item['name']}
+    - Price: {item['price']}
+    - Image: {item['image']}
+    - Category: {item.get('category', 'N/A')}
+    - Weight Value: {item.get('weight_value', 'N/A')}
+    - Unit Name: {item.get('unit_name', 'N/A')}
+    """)
+
     weight_value = item.get('weight_value')
     unit_name = item.get('unit_name')
+    
+    # Обработка единиц измерения
     if weight_value and unit_name:
         unit = unit_service.get_by_name(db, name=unit_name)
         if not unit:
@@ -386,17 +367,28 @@ def process_item(db: Session, store, item):
                 conversion_factor=get_conversion_factor(unit_name)
             )
             unit = unit_service.create(db, unit=unit_data)
+            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
     else:
         unit = None
+        logger.debug("No unit information available for this product")
+
+    # Создание продукта
     product_data = schemas.ProductCreate(
         name=item['name'],
         image_url=item['image'],
         weight_value=weight_value,
         unit_id=unit.unit_id if unit else None
     )
+    
+    # Проверка существующего продукта
     product = product_service.get_by_name_and_unit(db, name=item['name'], unit_id=unit.unit_id if unit else None)
     if not product:
         product = product_service.create(db, product=product_data)
+        logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
+    else:
+        logger.debug(f"Found existing product: {product.name} (ID: {product.product_id})")
+
+    # Создание данных о товаре в магазине
     psd_data = schemas.ProductStoreDataCreate(
         product_id=product.product_id,
         store_id=store.store_id,
@@ -406,13 +398,37 @@ def process_item(db: Session, store, item):
         store_weight_value=weight_value,
         store_unit_id=unit.unit_id if unit else None
     )
-    existing_psd = product_store_data_service.get_by_product_and_store(db, product_id=product.product_id, store_id=store.store_id)
+
+    # Обновление или создание записи
+    existing_psd = product_store_data_service.get_by_product_and_store(
+        db, 
+        product_id=product.product_id, 
+        store_id=store.store_id
+    )
+    
     if existing_psd:
+        old_price = existing_psd.price
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
         db.commit()
+        logger.debug(f"""
+        Updated existing store data:
+        - Product: {item['name']}
+        - Old price: {old_price}
+        - New price: {item['price']}
+        - Last updated: {existing_psd.last_updated}
+        """)
     else:
-        product_store_data_service.create(db, psd=psd_data)
+        new_psd = product_store_data_service.create(db, psd=psd_data)
+        logger.debug(f"""
+        Created new store data:
+        - Product: {item['name']}
+        - Price: {item['price']}
+        - Store: {store.name}
+        - Product ID: {new_psd.product_id}
+        """)
+
+    logger.debug("=" * 50)  # Разделитель между товарами
 
 def parse_weight(weight_str):
     if not weight_str:
@@ -435,63 +451,6 @@ def get_conversion_factor(unit_name):
         'l': 1000,
     }
     return unit_conversions.get(unit_name, 1)
-
-def initialize_chrome_driver():
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument('--headless')  # Запуск в фоновом режиме
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')  # Отключаем GPU
-    chrome_options.add_argument('--window-size=1920,1080')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    
-    driver = webdriver.Chrome(options=chrome_options)
-    driver.set_page_load_timeout(30)  # Увеличиваем timeout загрузки страницы
-    return driver
-
-def load_page(driver, url):
-    try:
-        driver.get(url)
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "tw-flex-shrink-0"))
-        )
-        return True
-    except TimeoutException:
-        logger.error("Timeout waiting for page load")
-        return False
-    except WebDriverException as e:
-        logger.error(f"Error loading page: {e}")
-        return False
-
-def scrape_barbora_category(driver, category_url):
-    try:
-        if not load_page(driver, category_url):
-            return []
-            
-        # Даем странице время полностью загрузиться
-        time.sleep(5)
-        
-        # Получаем список товаров
-        items = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
-        
-        products = []
-        for item in items:
-            try:
-                product = {
-                    'name': item.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text,
-                    'price': item.find_element(By.CSS_SELECTOR, "[id^='fti-product-price-']").text,
-                    # Добавьте другие нужные поля
-                }
-                products.append(product)
-            except Exception as e:
-                logger.warning(f"Error parsing product: {e}")
-                continue
-                
-        return products
-        
-    except Exception as e:
-        logger.error(f"Error scraping category: {e}")
-        return []
 
 if __name__ == "__main__":
     scrape_store_products()
