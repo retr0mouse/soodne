@@ -83,15 +83,15 @@ def process_store(db: Session, store):
     }
 
     # Rimi scraping
-    logger.info("Starting Rimi scraping...")
-    get_all_rimi_items(db, store, headers, user_agent)
-    logger.info("Finished Rimi scraping")
+    #logger.info("Starting Rimi scraping...")
+    #get_all_rimi_items(db, store, headers, user_agent)
+    #logger.info("Finished Rimi scraping")
 
 
     # Barbora scraping
-    #logger.info("Starting Barbora scraping...")
-    #get_all_barbora_items(db, store, headers, user_agent)
-    #logger.info("Finished Barbora scraping")
+    logger.info("Starting Barbora scraping...")
+    get_all_barbora_items(db, store, headers, user_agent)
+    logger.info("Finished Barbora scraping")
 
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
@@ -458,60 +458,76 @@ def get_rimi_categories(headers, user_agent):
             logger.error(f"Error closing driver: {str(e)}")
 
 def get_rimi_items_by_category(category, headers, user_agent):
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
     result_products = []
-    url = f"https://www.rimi.ee{category['link']}?pageSize=100"
     
-    if not is_allowed(url, user_agent):
-        logger.warning(f"Access to {url} is forbidden by robots.txt") 
-        return result_products
+    try:
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-    response = requests.get(url, headers=headers)
-    response.encoding = 'utf-8'
-    
-    if not response.ok:
-        logger.error(f"Error requesting page: {url}")
-        return result_products
+        url = f"https://www.rimi.ee{category['link']}?pageSize=100"
+        driver.get(url)
         
-    soup = BeautifulSoup(response.text, 'html.parser')
-    items = soup.select('li.product-grid__item')
-    
-    for item_html in items:
-        try:
-            data_gtm = item_html.select_one('div[data-gtm-eec-product]')
-            if not data_gtm:
-                continue
-                
-            item_data = data_gtm.get('data-gtm-eec-product')
-            item = json.loads(item_data)
-            
-            price_int = item_html.select_one('.price__integer')
-            price_dec = item_html.select_one('.price__decimal')
-            
-            if not price_int or not price_dec:
-                continue
-                
-            euros = price_int.get_text(strip=True)
-            cents = price_dec.get_text(strip=True)
-            
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "product-grid"))
+        )
+        
+        products = driver.find_elements(By.CSS_SELECTOR, "li.product-grid__item")
+        
+        for product in products:
             try:
-                product_price = round(float(f"{euros}.{cents}"), 2)
-            except ValueError:
-                continue
+                product_container = product.find_element(By.CLASS_NAME, "js-product-container")
+                product_data = product_container.get_attribute("data-gtm-eec-product")
+                product_json = json.loads(product_data)
                 
-            weight_value, unit_name = parse_weight(item.get('measure', ''))
+                name = product.find_element(By.CLASS_NAME, "card__name").text
+                weight_value, unit_name = parse_product_details(name)
+                
+                price_element = product.find_element(By.CLASS_NAME, "card__price")
+                price_whole = price_element.find_element(By.TAG_NAME, "span").text
+                price_decimal = price_element.find_element(By.TAG_NAME, "sup").text
+                price = float(f"{price_whole}.{price_decimal}")
+                
+                if not unit_name:
+                    try:
+                        unit_price = product.find_element(By.CLASS_NAME, "card__price-per").text
+                        unit_parts = unit_price.strip().split()
+                        unit_name = unit_parts[-1].replace('€/', '')
+                    except:
+                        unit_name = price_element.find_element(By.TAG_NAME, "sub").text.replace('€/', '')
+                
+                image_url = product.find_element(
+                    By.CSS_SELECTOR, 
+                    ".card__image-wrapper img"
+                ).get_attribute("src")
+                
+                result_products.append({
+                    "name": name,
+                    "price": price,
+                    "image": image_url,
+                    "weight_value": weight_value,
+                    "unit_name": unit_name,
+                    "category": category['title']
+                })
+                
+            except Exception as e:
+                logger.warning(f"Error parsing product: {str(e)}")
+                continue
             
-            result_products.append({
-                'name': item['name'],
-                'price': product_price,
-                'image': item_html.select_one('img')['src'],
-                'category': item['category'],
-                'weight_value': weight_value,
-                'unit_name': unit_name
-            })
-            
-        except (KeyError, json.JSONDecodeError) as e:
-            logger.error(f"Error processing product: {e}")
-            continue
+    finally:
+        if 'driver' in locals():
+            driver.quit()
             
     return result_products
 
