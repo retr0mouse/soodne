@@ -1,5 +1,3 @@
-# app/scraper/scrape_store_products.py
-
 import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
@@ -15,7 +13,20 @@ import random
 import time
 import json
 import urllib.robotparser
-from app.core.logger import logger
+from app.core.logger import setup_logger
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
+from tenacity import retry, stop_after_attempt, wait_exponential
+import re
+from urllib.parse import urljoin
+
+logger = setup_logger("scraper")
+logger.setLevel("DEBUG")
 
 def random_delay(min_seconds, max_seconds):
     return random.uniform(min_seconds, max_seconds)
@@ -28,44 +39,60 @@ def is_allowed(url, user_agent='Soodne/1.0'):
     return rp.can_fetch(user_agent, url)
 
 def scrape_store_products():
-    db: Session = SessionLocal()
-    user_agent = 'Soodne/1.0 (+Daniil %C5%A0arin <nuacho@tlu.ee>)'
-    headers = {'User-Agent': user_agent}
-
+    db = SessionLocal()
     try:
-        logger.info("=== Starting scraping process ===")
+        logger.info("=== Starting parsing process ===")
         
-        # Barbora scraping
-        logger.info("Starting Barbora scraping...")
-        barbora_store = store_service.get_by_name(db, name="Barbora")
-        if not barbora_store:
-            logger.info("Creating Barbora store in database...")
-            store_data = schemas.StoreCreate(
-                name="Barbora",
-                website_url="https://barbora.ee"
-            )
-            barbora_store = store_service.create(db, store=store_data)
-        get_all_barbora_items(db, barbora_store, headers, user_agent)
-        logger.info("Finished Barbora scraping")
-
-        # Rimi scraping
-        logger.info("Starting Rimi scraping...")
-        rimi_store = store_service.get_by_name(db, name="Rimi")
-        if not rimi_store:
-            logger.info("Creating Rimi store in database...")
-            store_data = schemas.StoreCreate(
-                name="Rimi",
-                website_url="https://www.rimi.ee"
-            )
-            rimi_store = store_service.create(db, store=store_data)
-        get_all_rimi_items(db, rimi_store, headers, user_agent)
-        logger.info("Finished Rimi scraping")
+        stores = {
+            "Barbora": "https://barbora.ee",
+            "Rimi": "https://www.rimi.ee/epood/ee"
+        }
         
-        logger.info("=== Scraping process completed successfully ===")
+        for store_name, url in stores.items():
+            try:
+                logger.info(f"Processing store: {store_name}")
+                store = store_service.get_by_name(db, name=store_name)
+                if not store:
+                    logger.info(f"Creating store {store_name} in database")
+                    store = store_service.create(db, schemas.StoreCreate(
+                        name=store_name,
+                        website_url=url
+                    ))
+                
+                process_store(db, store)
+                logger.info(f"Finished processing store: {store_name}")
+                
+            except Exception as e:
+                logger.error(f"Error processing store {store_name}: {str(e)}", exc_info=True)
+                continue
+                
+        logger.info("=== Parsing completed successfully ===")
+        
     except Exception as e:
-        logger.error(f"=== Scraping process failed: {str(e)} ===")
+        logger.error(f"Critical error during parsing process: {str(e)}", exc_info=True)
     finally:
         db.close()
+
+def process_store(db: Session, store):
+    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+    headers = {
+        'User-Agent': user_agent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    }
+
+    # Rimi scraping
+    #logger.info("Starting Rimi scraping...")
+    #get_all_rimi_items(db, store, headers, user_agent)
+    #logger.info("Finished Rimi scraping")
+
+
+    # Barbora scraping
+    logger.info("Starting Barbora scraping...")
+    get_all_barbora_items(db, store, headers, user_agent)
+    logger.info("Finished Barbora scraping")
+
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
@@ -90,60 +117,238 @@ def get_barbora_categories(headers, user_agent):
     if not is_allowed(url, user_agent):
         logger.warning(f"Access to {url} is forbidden according to robots.txt")
         return []
-    response = requests.get(url, headers=headers)
-    response.encoding = 'utf-8'
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
-    categories = soup.select('li.b-categories-root-category > a')
-    result_categories = []
-    for category in categories:
-        title = category.text.strip()
-        link = category['href']
-        result_categories.append({'title': title, 'link': link})
-    return result_categories
-
-def get_barbora_items_by_category(category, headers, user_agent):
-    result_products = []
-    current_page = 0
-    while True:
-        time.sleep(random_delay(3, 7))
-        url = f"https://barbora.ee{category['link']}?page={current_page}"
-        if not is_allowed(url, user_agent):
-            logger.warning(f"Access to {url} is forbidden according to robots.txt")
-            break
+        
+    try:
         response = requests.get(url, headers=headers)
         response.encoding = 'utf-8'
-        if not response.ok:
-            logger.error(f"Error requesting page: {url}")
-            break
+        response.raise_for_status()
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('div.b-product--wrap[data-b-for-cart]')
-        if not items:
-            break
-        for item_html in items:
-            item_data = item_html.get('data-b-for-cart')
-            if not item_data:
-                continue
-            try:
-                item = json.loads(item_data)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decoding error: {e}")
-                continue
-            product_name = item['title']
-            product_price = round(float(item['price']), 2)
-            product_image_url = item['image']
-            product_weight = item.get('measure')
-            weight_value, unit_name = parse_weight(product_weight)
-            result_products.append({
-                'name': product_name,
-                'price': product_price,
-                'image': product_image_url,
-                'category': category['title'],
-                'weight_value': weight_value,
-                'unit_name': unit_name
+        script_tags = soup.find_all('script', type='text/javascript')
+        categories_data = None
+        
+        for script in script_tags:
+            if script.string and 'window.b_categories' in script.string:
+                json_str = script.string.split('window.b_categories = ')[1].split(';')[0]
+                categories_data = json.loads(json_str)
+                break
+                
+        if not categories_data:
+            logger.error("Categories data not found in page source")
+            return []
+            
+        result_categories = []
+        for category in categories_data['categories']:
+            result_categories.append({
+                'title': category['title'],
+                'link': f"/{category['url']}" if category['url'] else None
             })
-        current_page += 1
+            
+        return result_categories
+        
+    except (requests.RequestException, json.JSONDecodeError) as e:
+        logger.error(f"Error getting Barbora categories: {str(e)}")
+        return []
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10)
+)
+def get_barbora_items_by_category(category, headers, user_agent):
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    result_products = []
+    page = 1
+    
+    try:
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        logger.debug("Chrome driver successfully initialized")
+        
+        while True:
+            url = f"https://barbora.ee{category['link']}?page={page}"
+            logger.debug(f"Loading page: {url}")
+            
+            try:
+                driver.get(url)
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                    )
+                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+                except Exception as e:
+                    logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
+                
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid^='product-card-']"))
+                )
+                
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(5)
+                
+                products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
+                logger.debug(f"Raw products found on page {page}: {len(products)}")
+                
+                valid_products_count = 0
+                for product in products:
+                    try:
+                        name = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text
+                        
+                        weight_value, unit_name = parse_product_details(name)
+                        
+                        if not product.is_displayed():
+                            logger.debug("Product not displayed, skipping")
+                            continue
+                            
+                        driver.execute_script("arguments[0].scrollIntoView(true);", product)
+                        time.sleep(1)
+                        
+                        price_container = None
+                        price_selectors = [
+                            "[id^='fti-product-price-']",
+                            "[data-testid='promoColouredContainer']",
+                            "div.tw-border-neutral-200"
+                        ]
+                        
+                        for selector in price_selectors:
+                            try:
+                                price_container = product.find_element(By.CSS_SELECTOR, selector)
+                                if price_container:
+                                    break
+                            except NoSuchElementException:
+                                continue
+                        
+                        if not price_container:
+                            logger.warning(f"Price container not found for product: {name}")
+                            continue
+                        
+                        price_elements = price_container.find_elements(By.CSS_SELECTOR, "span.tw-font-bold, span.tw-text-xl, span.tw-text-sm")
+                        price_text = [elem.text for elem in price_elements if elem.text.strip()]
+                        
+                        price = None
+                        for i in range(len(price_text)-1):
+                            try:
+                                euros = price_text[i].replace(',', '.')
+                                cents = price_text[i+1].replace(',', '.')
+                                if euros.replace('.', '').isdigit() and cents.replace('.', '').isdigit():
+                                    price = float(f"{euros}.{cents}")
+                                    break
+                            except (ValueError, IndexError):
+                                continue
+                        
+                        if not price:
+                            logger.warning(f"Could not parse price for product: {name}")
+                            continue
+                        
+                        try:
+                            img_element = product.find_element(By.CSS_SELECTOR, "img")
+                            image_url = img_element.get_attribute("src")
+                        except:
+                            image_url = "https://barbora.ee/Assets/Images/logo-square.png"
+                            logger.warning(f"Image not found for product: {name}")
+                        
+                        result_products.append({
+                            'name': name,
+                            'price': price,
+                            'image': image_url,
+                            'weight_value': weight_value,
+                            'unit_name': unit_name
+                        })
+                        valid_products_count += 1
+                        
+                        logger.debug(f"""
+                            Processing raw item data:
+                            - Name: {name}
+                            - Price: {price}
+                            - Image: {image_url}
+                            - Weight Value: {weight_value}
+                            - Unit Name: {unit_name}
+                        """)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error parsing product: {str(e)}")
+                        continue
+                
+                logger.debug(f"Valid products added from page {page}: {valid_products_count}")
+                logger.debug(f"Current total products: {len(result_products)}")
+                
+                if valid_products_count == 0:
+                    logger.info(f"No more products found on page {page}, stopping pagination")
+                    break
+                    
+                page += 1
+                time.sleep(random_delay(2, 4))
+                
+            except Exception as e:
+                logger.error(f"Error loading page: {str(e)}")
+                break
+                
+    finally:
+        try:
+            if 'driver' in locals():
+                driver.quit()
+                logger.debug("Chrome driver successfully closed")
+        except Exception as e:
+            logger.error(f"Error while closing driver: {str(e)}")
+            
+    logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
+
+def parse_product_details(name):
+    weight_value = None
+    unit_name = None
+    
+    weight_patterns = [
+        r'(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|tk|tk\/pk|pk)',
+        r'(\d+(?:[.,]\d+)?)(g|kg|ml|l)(?!\w)',
+        r'(?:^|,\s*)(\d+)?\s*,?\s*(kg)$',
+        r',\s*(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|tk|tk\/pk|pk)',
+        r'(\d+)\s*kl\s*\.,\s*(kg)',
+        r'(?:^|,\s*)(\d+)?\s*(tk)(?:\s|$)',
+    ]
+    
+    for pattern in weight_patterns:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            if len(match.groups()) == 2:
+                weight_str = match.group(1)
+                unit_name = match.group(2).lower()
+            else:
+                weight_str = '1'
+                unit_name = match.group(1).lower()
+            
+            unit_mapping = {
+                'g': 'g',
+                'kg': 'kg',
+                'ml': 'ml',
+                'l': 'l',
+                'tk': 'pc',
+                'tk/pk': 'pc',
+                'pk': 'pack'
+            }
+            unit_name = unit_mapping.get(unit_name, unit_name)
+            
+            try:
+                if weight_str:
+                    weight_value = float(weight_str.replace(',', '.'))
+                else:
+                    weight_value = 1.0
+            except (ValueError, TypeError):
+                continue
+            
+            break
+    
+    return weight_value, unit_name
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Rimi categories...")
@@ -163,76 +368,183 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10)
+)
 def get_rimi_categories(headers, user_agent):
-    url = 'https://www.rimi.ee/epood/ee'
-    if not is_allowed(url, user_agent):
-        logger.warning(f"Access to {url} is forbidden according to robots.txt")
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    categories = []
+    driver = None
+    
+    try:
+        logger.debug("Initializing Chrome driver...")
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        logger.debug("Chrome driver initialized successfully")
+        
+        url = 'https://www.rimi.ee/epood/ee'
+        logger.debug(f"Navigating to URL: {url}")
+        driver.get(url)
+        
+        time.sleep(10)
+        
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".category-menu button.trigger"))
+        )
+        
+        category_elements = driver.find_elements(By.CSS_SELECTOR, ".category-menu button.trigger")
+        logger.debug(f"Found {len(category_elements)} category elements")
+        
+        for element in category_elements:
+            try:
+                href = element.get_attribute('href')
+                name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
+                
+                if href and name:
+                    category_id = href.split('/c/')[-1] if '/c/' in href else None
+                    
+                    if category_id:
+                        categories.append({
+                            'title': name,
+                            'link': href,
+                            'id': category_id.strip()
+                        })
+                        logger.debug(f"Added category: {name} (ID: {category_id})")
+            except Exception as e:
+                logger.warning(f"Error processing category element: {str(e)}")
+                continue
+
+        if not categories:
+            logger.debug("Trying JavaScript method to get categories")
+            categories_js = driver.execute_script("""
+                return Array.from(document.querySelectorAll('.category-menu button.trigger')).map(el => {
+                    const href = el.getAttribute('href');
+                    const categoryId = href ? href.split('/c/').pop().trim() : null;
+                    return {
+                        title: el.querySelector('span.name').textContent.trim(),
+                        link: href,
+                        id: categoryId
+                    };
+                }).filter(cat => cat.title && cat.link && cat.id);
+            """)
+            
+            if categories_js:
+                categories = categories_js
+                logger.debug(f"Found {len(categories)} categories using JavaScript")
+        
+        return categories
+        
+    except Exception as e:
+        logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
         return []
-    response = requests.get(url, headers=headers)
-    response.encoding = 'utf-8'
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, 'html.parser')
-    categories = soup.select('div.category-menu a')
-    result_categories = []
-    for category in categories:
-        title = category.get_text(strip=True)
-        link = category['href']
-        result_categories.append({'title': title, 'link': link})
-    return result_categories
+        
+    finally:
+        try:
+            if driver:
+                driver.quit()
+                logger.debug("Chrome driver closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing driver: {str(e)}")
 
 def get_rimi_items_by_category(category, headers, user_agent):
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
     result_products = []
-    current_page = 1
-    while True:
-        time.sleep(random_delay(3, 7))
-        url = f"https://www.rimi.ee{category['link']}?page={current_page}&pageSize=99"
-        if not is_allowed(url, user_agent):
-            logger.warning(f"Access to {url} is forbidden according to robots.txt")
-            break
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
-        if not response.ok:
-            logger.error(f"Error requesting page: {url}")
-            break
-        soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.select('li.product-grid__item')
-        if not items:
-            break
-        for item_html in items:
-            data_gtm = item_html.select_one('div[data-gtm-eec-product]')
-            if not data_gtm:
-                continue
-            item_data = data_gtm.get('data-gtm-eec-product')
+    
+    try:
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        url = f"https://www.rimi.ee{category['link']}?pageSize=100"
+        driver.get(url)
+        
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "product-grid"))
+        )
+        
+        products = driver.find_elements(By.CSS_SELECTOR, "li.product-grid__item")
+        
+        for product in products:
             try:
-                item = json.loads(item_data)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decoding error: {e}")
+                product_container = product.find_element(By.CLASS_NAME, "js-product-container")
+                product_data = product_container.get_attribute("data-gtm-eec-product")
+                product_json = json.loads(product_data)
+                
+                name = product.find_element(By.CLASS_NAME, "card__name").text
+                weight_value, unit_name = parse_product_details(name)
+                
+                price_element = product.find_element(By.CLASS_NAME, "card__price")
+                price_whole = price_element.find_element(By.TAG_NAME, "span").text
+                price_decimal = price_element.find_element(By.TAG_NAME, "sup").text
+                price = float(f"{price_whole}.{price_decimal}")
+                
+                if not unit_name:
+                    try:
+                        unit_price = product.find_element(By.CLASS_NAME, "card__price-per").text
+                        unit_parts = unit_price.strip().split()
+                        unit_name = unit_parts[-1].replace('€/', '')
+                    except:
+                        unit_name = price_element.find_element(By.TAG_NAME, "sub").text.replace('€/', '')
+                
+                image_url = product.find_element(
+                    By.CSS_SELECTOR, 
+                    ".card__image-wrapper img"
+                ).get_attribute("src")
+                
+                result_products.append({
+                    "name": name,
+                    "price": price,
+                    "image": image_url,
+                    "weight_value": weight_value,
+                    "unit_name": unit_name,
+                    "category": category['title']
+                })
+                
+            except Exception as e:
+                logger.warning(f"Error parsing product: {str(e)}")
                 continue
-            product_name = item['name']
-            euros = item_html.select_one('.price__integer').get_text(strip=True)
-            cents = item_html.select_one('.price__decimal').get_text(strip=True)
-            try:
-                product_price = round(float(f"{euros}.{cents}"), 2)
-            except ValueError as e:
-                logger.error(f"Price conversion error: {e}")
-                continue
-            product_image_url = item_html.select_one('img')['src']
-            product_weight = item.get('measure')
-            weight_value, unit_name = parse_weight(product_weight)
-            result_products.append({
-                'name': product_name,
-                'price': product_price,
-                'image': product_image_url,
-                'category': item['category'],
-                'weight_value': weight_value,
-                'unit_name': unit_name
-            })
-        current_page += 1
+            
+    finally:
+        if 'driver' in locals():
+            driver.quit()
+            
     return result_products
 
 def process_item(db: Session, store, item):
+    logger.debug(f"""
+    Processing raw item data:
+    - Name: {item['name']}
+    - Price: {item['price']}
+    - Image: {item['image']}
+    - Category: {item.get('category', 'N/A')}
+    - Weight Value: {item.get('weight_value', 'N/A')}
+    - Unit Name: {item.get('unit_name', 'N/A')}
+    """)
+
     weight_value = item.get('weight_value')
     unit_name = item.get('unit_name')
+    
     if weight_value and unit_name:
         unit = unit_service.get_by_name(db, name=unit_name)
         if not unit:
@@ -241,17 +553,25 @@ def process_item(db: Session, store, item):
                 conversion_factor=get_conversion_factor(unit_name)
             )
             unit = unit_service.create(db, unit=unit_data)
+            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
     else:
         unit = None
+        logger.debug("No unit information available for this product")
+
     product_data = schemas.ProductCreate(
         name=item['name'],
         image_url=item['image'],
         weight_value=weight_value,
         unit_id=unit.unit_id if unit else None
     )
+    
     product = product_service.get_by_name_and_unit(db, name=item['name'], unit_id=unit.unit_id if unit else None)
     if not product:
         product = product_service.create(db, product=product_data)
+        logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
+    else:
+        logger.debug(f"Found existing product: {product.name} (ID: {product.product_id})")
+
     psd_data = schemas.ProductStoreDataCreate(
         product_id=product.product_id,
         store_id=store.store_id,
@@ -261,13 +581,36 @@ def process_item(db: Session, store, item):
         store_weight_value=weight_value,
         store_unit_id=unit.unit_id if unit else None
     )
-    existing_psd = product_store_data_service.get_by_product_and_store(db, product_id=product.product_id, store_id=store.store_id)
+
+    existing_psd = product_store_data_service.get_by_product_and_store(
+        db, 
+        product_id=product.product_id, 
+        store_id=store.store_id
+    )
+    
     if existing_psd:
+        old_price = existing_psd.price
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
         db.commit()
+        logger.debug(f"""
+        Updated existing store data:
+        - Product: {item['name']}
+        - Old price: {old_price}
+        - New price: {item['price']}
+        - Last updated: {existing_psd.last_updated}
+        """)
     else:
-        product_store_data_service.create(db, psd=psd_data)
+        new_psd = product_store_data_service.create(db, psd=psd_data)
+        logger.debug(f"""
+        Created new store data:
+        - Product: {item['name']}
+        - Price: {item['price']}
+        - Store: {store.name}
+        - Product ID: {new_psd.product_id}
+        """)
+
+    logger.debug("=" * 50)
 
 def parse_weight(weight_str):
     if not weight_str:
@@ -278,7 +621,7 @@ def parse_weight(weight_str):
     try:
         value = float(parts[0].replace(',', '.'))
         unit = parts[1].lower()
-        return value, unit
+        return value, unit 
     except ValueError:
         return None, None
 

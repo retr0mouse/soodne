@@ -10,7 +10,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TABLE IF NOT EXISTS Units (
+CREATE TABLE IF NOT EXISTS units (
     unit_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
     conversion_factor DECIMAL(10, 6) NOT NULL,
@@ -19,11 +19,37 @@ CREATE TABLE IF NOT EXISTS Units (
 );
 
 CREATE TRIGGER trg_update_units_updated_at
-BEFORE UPDATE ON Units
+BEFORE UPDATE ON units
 FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
 
-CREATE TABLE IF NOT EXISTS Stores (
+CREATE TABLE IF NOT EXISTS categories (
+    category_id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    parent_id INTEGER,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+    CONSTRAINT fk_parent_category
+        FOREIGN KEY (parent_id)
+            REFERENCES categories (category_id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE,
+    CONSTRAINT uq_category_name_parent UNIQUE (name, parent_id)
+);
+
+CREATE TRIGGER trg_update_categories_updated_at
+BEFORE UPDATE ON categories
+FOR EACH ROW
+EXECUTE PROCEDURE update_updated_at();
+
+CREATE INDEX IF NOT EXISTS idx_categories_parent_id
+    ON categories (parent_id);
+
+CREATE INDEX IF NOT EXISTS idx_categories_name
+    ON categories (name);
+
+CREATE TABLE IF NOT EXISTS stores (
     store_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL UNIQUE,
     website_url TEXT,
@@ -33,36 +59,11 @@ CREATE TABLE IF NOT EXISTS Stores (
 );
 
 CREATE TRIGGER trg_update_stores_updated_at
-BEFORE UPDATE ON Stores
+BEFORE UPDATE ON stores
 FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
 
-CREATE TABLE IF NOT EXISTS Categories (
-    category_id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    parent_id INTEGER,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    CONSTRAINT fk_parent_category
-        FOREIGN KEY (parent_id)
-            REFERENCES Categories (category_id)
-            ON DELETE SET NULL
-            ON UPDATE CASCADE,
-    CONSTRAINT uq_category_name_parent UNIQUE (name, parent_id)
-);
-
-CREATE TRIGGER trg_update_categories_updated_at
-BEFORE UPDATE ON Categories
-FOR EACH ROW
-EXECUTE PROCEDURE update_updated_at();
-
-CREATE INDEX IF NOT EXISTS idx_categories_parent_id
-    ON Categories (parent_id);
-
-CREATE INDEX IF NOT EXISTS idx_categories_name
-    ON Categories (name);
-
-CREATE TABLE IF NOT EXISTS Products (
+CREATE TABLE IF NOT EXISTS products (
     product_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     description TEXT,
@@ -75,37 +76,37 @@ CREATE TABLE IF NOT EXISTS Products (
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     CONSTRAINT fk_unit
         FOREIGN KEY (unit_id)
-            REFERENCES Units (unit_id),
+            REFERENCES units (unit_id),
     CONSTRAINT fk_category
         FOREIGN KEY (category_id)
-            REFERENCES Categories (category_id)
+            REFERENCES categories (category_id)
             ON DELETE SET NULL
             ON UPDATE CASCADE
 );
 
 CREATE TRIGGER trg_update_products_updated_at
-BEFORE UPDATE ON Products
+BEFORE UPDATE ON products
 FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
 
 CREATE INDEX IF NOT EXISTS idx_products_category_id
-    ON Products (category_id);
+    ON products (category_id);
 
 CREATE INDEX IF NOT EXISTS idx_products_name
-    ON Products (name);
+    ON products (name);
 
 CREATE INDEX IF NOT EXISTS idx_products_name_lower
-    ON Products (LOWER(name));
+    ON products (LOWER(name));
 
 CREATE INDEX IF NOT EXISTS idx_products_name_trgm
-    ON Products
+    ON products
     USING GIN (name gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_products_fulltext
-    ON Products
+    ON products
     USING GIN (to_tsvector('english', name || ' ' || COALESCE(description, '')));
 
-CREATE TABLE IF NOT EXISTS ProductStoreData (
+CREATE TABLE IF NOT EXISTS product_store_data (
     product_store_id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL,
     store_id INTEGER NOT NULL,
@@ -124,56 +125,56 @@ CREATE TABLE IF NOT EXISTS ProductStoreData (
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     CONSTRAINT fk_product
         FOREIGN KEY (product_id)
-            REFERENCES Products (product_id)
+            REFERENCES products (product_id)
             ON DELETE CASCADE
             ON UPDATE CASCADE,
     CONSTRAINT fk_store
         FOREIGN KEY (store_id)
-            REFERENCES Stores (store_id)
+            REFERENCES stores (store_id)
             ON DELETE CASCADE
             ON UPDATE CASCADE,
     CONSTRAINT fk_store_unit
         FOREIGN KEY (store_unit_id)
-            REFERENCES Units (unit_id)
+            REFERENCES units (unit_id)
 );
 
 CREATE TRIGGER trg_update_productstoredata_updated_at
-BEFORE UPDATE ON ProductStoreData
+BEFORE UPDATE ON product_store_data
 FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_product_id
-    ON ProductStoreData (product_id);
+    ON product_store_data (product_id);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_store_id
-    ON ProductStoreData (store_id);
+    ON product_store_data (store_id);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_last_updated
-    ON ProductStoreData (last_updated);
+    ON product_store_data (last_updated);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_product_price
-    ON ProductStoreData (product_id, price);
+    ON product_store_data (product_id, price);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_price_per_unit
-    ON ProductStoreData (price_per_unit);
+    ON product_store_data (price_per_unit);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_additional_attributes
-    ON ProductStoreData
+    ON product_store_data
     USING GIN (additional_attributes);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_matching_status
-    ON ProductStoreData (matching_status);
+    ON product_store_data (matching_status);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_name_trgm
-    ON ProductStoreData
+    ON product_store_data
     USING GIN (store_product_name gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_store_description_trgm
-    ON ProductStoreData
+    ON product_store_data
     USING GIN (store_description gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_stores_name
-    ON Stores (name);
+    ON stores (name);
 
 CREATE OR REPLACE FUNCTION update_last_updated()
 RETURNS TRIGGER AS $$
@@ -184,7 +185,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_update_last_updated
-BEFORE UPDATE ON ProductStoreData
+BEFORE UPDATE ON product_store_data
 FOR EACH ROW
 EXECUTE PROCEDURE update_last_updated();
 
@@ -202,32 +203,32 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_reset_matching_status
-BEFORE UPDATE ON ProductStoreData
+BEFORE UPDATE ON product_store_data
 FOR EACH ROW
 EXECUTE PROCEDURE reset_matching_status();
 
-CREATE TABLE IF NOT EXISTS ProductPriceHistory (
+CREATE TABLE IF NOT EXISTS product_price_history (
     price_history_id SERIAL PRIMARY KEY,
     product_store_id INTEGER NOT NULL,
     price DECIMAL(10, 2) NOT NULL CHECK (price >= 0),
     recorded_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     CONSTRAINT fk_product_store
         FOREIGN KEY (product_store_id)
-            REFERENCES ProductStoreData (product_store_id)
+            REFERENCES product_store_data (product_store_id)
             ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_pricehistory_product_store_id
-    ON ProductPriceHistory (product_store_id);
+    ON product_price_history (product_store_id);
 
 CREATE INDEX IF NOT EXISTS idx_pricehistory_recorded_at
-    ON ProductPriceHistory (recorded_at);
+    ON product_price_history (recorded_at);
 
 CREATE OR REPLACE FUNCTION record_price_history()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.price <> OLD.price THEN
-        INSERT INTO ProductPriceHistory (product_store_id, price, recorded_at)
+        INSERT INTO product_price_history (product_store_id, price, recorded_at)
         VALUES (NEW.product_store_id, NEW.price, NOW());
     END IF;
     RETURN NEW;
@@ -235,12 +236,12 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_record_price_history
-AFTER UPDATE OF price ON ProductStoreData
+AFTER UPDATE OF price ON product_store_data
 FOR EACH ROW
 WHEN (OLD.price IS DISTINCT FROM NEW.price)
 EXECUTE PROCEDURE record_price_history();
 
-CREATE TABLE IF NOT EXISTS ProductMatchingLog (
+CREATE TABLE IF NOT EXISTS product_matching_log (
     log_id SERIAL PRIMARY KEY,
     product_store_id INTEGER NOT NULL,
     product_id INTEGER,
@@ -249,14 +250,14 @@ CREATE TABLE IF NOT EXISTS ProductMatchingLog (
     matched_by VARCHAR(50),
     CONSTRAINT fk_product_store_log
         FOREIGN KEY (product_store_id)
-            REFERENCES ProductStoreData (product_store_id),
+            REFERENCES product_store_data (product_store_id),
     CONSTRAINT fk_product_log
         FOREIGN KEY (product_id)
-            REFERENCES Products (product_id)
+            REFERENCES products (product_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_matching_log_product_id
-    ON ProductMatchingLog (product_id);
+    ON product_matching_log (product_id);
 
 CREATE INDEX IF NOT EXISTS idx_product_matching_log_confidence_score
-    ON ProductMatchingLog (confidence_score);
+    ON product_matching_log (confidence_score);

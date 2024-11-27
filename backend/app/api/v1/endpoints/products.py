@@ -4,8 +4,11 @@ from typing import List, Optional
 from app import schemas
 from app.services import product_service
 from app.api import deps
+from app.core.logger import setup_logger
 
 router = APIRouter()
+
+logger = setup_logger("api.products")
 
 @router.get("/", response_model=List[schemas.Product])
 def read_products(
@@ -18,13 +21,17 @@ def read_products(
         unit_id: Optional[int] = None,
         db: Session = Depends(deps.get_db)
 ):
-    products = product_service.get_multi(
-        db, skip=skip, limit=limit,
-        name=name, category_id=category_id,
-        min_weight=min_weight, max_weight=max_weight,
-        unit_id=unit_id
-    )
-    return products
+    try:
+        products = product_service.get_multi(
+            db, skip=skip, limit=limit,
+            name=name, category_id=category_id,
+            min_weight=min_weight, max_weight=max_weight,
+            unit_id=unit_id
+        )
+        return products
+    except Exception as e:
+        logger.error(f"Error getting product list: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/{product_id}", response_model=schemas.Product)
 def read_product(product_id: int, db: Session = Depends(deps.get_db)):

@@ -2,12 +2,12 @@ from sqlalchemy import (
     Column, Integer, DECIMAL, ForeignKey, String, Text, TIMESTAMP, Enum, JSON
 )
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy import func
 from app.database.database import Base
 from .enums import MatchingStatusEnum
 
 class ProductStoreData(Base):
-    __tablename__ = "productstoredata"
+    __tablename__ = "product_store_data"
 
     product_store_id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False)
@@ -26,9 +26,8 @@ class ProductStoreData(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())
 
-    product = relationship("Product", back_populates="product_store_data")
+    product = relationship("Product", back_populates="store_data")
     store = relationship("Store", back_populates="product_store_data")
     store_unit = relationship("Unit", back_populates="product_store_data")
-
     price_history = relationship("ProductPriceHistory", back_populates="product_store_data")
     matching_logs = relationship("ProductMatchingLog", back_populates="product_store_data")

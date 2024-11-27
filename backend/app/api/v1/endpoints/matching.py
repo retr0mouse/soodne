@@ -6,8 +6,10 @@ from app.services import product_store_data_service, product_matching_log_servic
 from app.ai.matcher import match_products
 from app.api import deps
 from app.core.jobs import scheduled_job
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/match", response_model=schemas.ProductMatchingLog)
 def match_two_products(
@@ -52,6 +54,7 @@ async def run_parsing():
         scrape_store_products()
         return {"message": "Parsing started successfully!"}
     except Exception as e:
+        logger.error(f"Error starting parsing: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error while starting parsing: {str(e)}")
 
 @router.post("/run-scheduled-job", response_model=schemas.JobStatus)

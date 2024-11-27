@@ -4,7 +4,7 @@ from app import models, schemas
 
 class ProductService:
     def get(self, db: Session, product_id: int):
-        return db.query(models.Product).filter(models.Product.product_id == product_id).first()
+        return db.query(models.Product).filter(models.Product.id == product_id).first()
 
     def get_by_name_and_unit(self, db: Session, name: str, unit_id: Optional[int]):
         return db.query(models.Product).filter(
