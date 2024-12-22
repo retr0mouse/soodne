@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS product_store_data (
     store_image_url TEXT,
     store_weight_value DECIMAL(10, 2) CHECK (store_weight_value >= 0),
     store_unit_id INTEGER,
+    ean VARCHAR(13), 
     additional_attributes JSONB,
     matching_status matching_status_enum DEFAULT 'unmatched',
     last_matched TIMESTAMP WITHOUT TIME ZONE,
@@ -173,6 +174,9 @@ CREATE INDEX IF NOT EXISTS idx_productstoredata_store_description_trgm
     ON product_store_data
     USING GIN (store_description gin_trgm_ops);
 
+CREATE INDEX IF NOT EXISTS idx_productstoredata_ean
+    ON product_store_data (ean);
+
 CREATE INDEX IF NOT EXISTS idx_stores_name
     ON stores (name);
 
@@ -192,14 +196,15 @@ EXECUTE PROCEDURE update_last_updated();
 CREATE OR REPLACE FUNCTION reset_matching_status()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.store_product_name <> OLD.store_product_name
-        OR NEW.store_description <> OLD.store_description
-        OR NEW.store_image_url <> OLD.store_image_url THEN
-        NEW.matching_status = 'unmatched';
-        NEW.product_id = NULL;
-    END IF;
-    RETURN NEW;
-END;
+   IF NEW.store_product_name <> OLD.store_product_name
+       OR NEW.store_description <> OLD.store_description
+       OR NEW.store_image_url <> OLD.store_image_url
+       OR NEW.ean <> OLD.ean THEN
+       NEW.matching_status = 'unmatched';
+       NEW.product_id = NULL;
+   END IF;
+   RETURN NEW;
+END;    
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_reset_matching_status
