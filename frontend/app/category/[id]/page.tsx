@@ -26,6 +26,13 @@ export default function CategoryPage() {
         fetchData();
     }, [id]);
 
+    useEffect(() => {
+        window.scrollTo({
+            top: 0,
+            behavior: "smooth"
+        });
+    }, [currentPage])
+
 
     // Get current products
     const indexOfLastProduct = currentPage * productsPerPage;

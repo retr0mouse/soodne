@@ -1,5 +1,5 @@
 'use client'
-import React, { ReactElement, useEffect } from 'react';
+import React, { ReactElement } from 'react';
 import { useCart } from '../context/CartContext';
 import Link from 'next/link';
 
