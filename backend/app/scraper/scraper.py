@@ -29,7 +29,7 @@ logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
 
 def random_delay(min_seconds, max_seconds):
-    return random.uniform(min_seconds, max_seconds)
+    return random.uniform(min_seconds, max_seconds) * 0.5
 
 def is_allowed(url, user_agent='Soodne/1.0'):
     domain = '/'.join(url.split('/')[:3])
@@ -215,7 +215,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
                 )
                 
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(5)
+                time.sleep(2)
                 
                 products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
                 logger.debug(f"Raw products found on page {page}: {len(products)}")
@@ -232,7 +232,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
                             continue
                             
                         driver.execute_script("arguments[0].scrollIntoView(true);", product)
-                        time.sleep(1)
+                        time.sleep(0.5)
                         
                         price_container = None
                         price_selectors = [
@@ -308,7 +308,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
                     break
                     
                 page += 1
-                time.sleep(random_delay(2, 4))
+                time.sleep(random_delay(1, 2))
                 
             except Exception as e:
                 logger.error(f"Error loading page: {str(e)}")
