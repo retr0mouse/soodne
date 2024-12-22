@@ -113,42 +113,63 @@ def get_all_barbora_items(db: Session, store, headers, user_agent):
             process_item(db, store, item)
 
 def get_barbora_categories(headers, user_agent):
-    url = 'https://barbora.ee'
-    if not is_allowed(url, user_agent):
-        logger.warning(f"Access to {url} is forbidden according to robots.txt")
-        return []
-        
+    chrome_options = Options()
+    chrome_options.add_argument('--headless=new')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument(f'user-agent={user_agent}')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
     try:
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
-        response.raise_for_status()
+        service = Service()
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        soup = BeautifulSoup(response.text, 'html.parser')
-        script_tags = soup.find_all('script', type='text/javascript')
-        categories_data = None
+        url = 'https://barbora.ee'
+        logger.debug(f"Navigating to URL: {url}")
+        driver.get(url)
         
-        for script in script_tags:
-            if script.string and 'window.b_categories' in script.string:
-                json_str = script.string.split('window.b_categories = ')[1].split(';')[0]
-                categories_data = json.loads(json_str)
-                break
-                
-        if not categories_data:
-            logger.error("Categories data not found in page source")
-            return []
-            
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "desktop-menu--parent-category-list"))
+        )
+        
+        time.sleep(5)  
+        categories = driver.find_elements(By.CSS_SELECTOR, ".desktop-menu--category a.category-item--title")
+        
         result_categories = []
-        for category in categories_data['categories']:
-            result_categories.append({
-                'title': category['title'],
-                'link': f"/{category['url']}" if category['url'] else None
-            })
-            
+        for category in categories:
+            try:
+                title = category.find_element(By.TAG_NAME, "span").text
+                link = category.get_attribute("href")
+                if link:
+                    link = link.replace("https://barbora.ee", "")
+                    result_categories.append({
+                        'title': title,
+                        'link': link
+                    })
+                    logger.debug(f"Added category: {title} with link: {link}")
+            except Exception as e:
+                logger.warning(f"Error processing category element: {str(e)}")
+                continue
+        
+        logger.info(f"Found {len(result_categories)} categories")
         return result_categories
         
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.error(f"Error getting Barbora categories: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error getting Barbora categories: {str(e)}", exc_info=True)
         return []
+        
+    finally:
+        try:
+            if 'driver' in locals():
+                driver.quit()
+                logger.debug("Chrome driver closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing driver: {str(e)}")
 
 @retry(
     stop=stop_after_attempt(3),
