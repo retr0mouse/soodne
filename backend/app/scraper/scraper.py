@@ -83,9 +83,9 @@ def process_store(db: Session, store):
     }
 
     # Rimi scraping
-    #logger.info("Starting Rimi scraping...")
-    #get_all_rimi_items(db, store, headers, user_agent)
-    #logger.info("Finished Rimi scraping")
+    logger.info("Starting Rimi scraping...")
+    get_all_rimi_items(db, store, headers, user_agent)
+    logger.info("Finished Rimi scraping")
 
 
     # Barbora scraping
@@ -209,75 +209,27 @@ def get_barbora_items_by_category(category, headers, user_agent):
                     driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
                 except Exception as e:
                     logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
-                
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid^='product-card-']"))
-                )
-                
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-                
-                products = driver.find_elements(By.CSS_SELECTOR, "[data-testid^='product-card-']")
+
+                products = driver.execute_script("return window.b_productList;")
+                if len(products) == 0:
+                    logger.info(f"No more products found on page {page}, stopping pagination")
+                    break
+
                 logger.debug(f"Raw products found on page {page}: {len(products)}")
                 
                 valid_products_count = 0
                 for product in products:
                     try:
-                        name = product.find_element(By.CSS_SELECTOR, "[id^='fti-product-title-']").text
-                        
+                        name = product['title']
+
                         weight_value, unit_name = parse_product_details(name)
-                        
-                        if not product.is_displayed():
-                            logger.debug("Product not displayed, skipping")
-                            continue
-                            
-                        driver.execute_script("arguments[0].scrollIntoView(true);", product)
-                        time.sleep(0.5)
-                        
-                        price_container = None
-                        price_selectors = [
-                            "[id^='fti-product-price-']",
-                            "[data-testid='promoColouredContainer']",
-                            "div.tw-border-neutral-200"
-                        ]
-                        
-                        for selector in price_selectors:
-                            try:
-                                price_container = product.find_element(By.CSS_SELECTOR, selector)
-                                if price_container:
-                                    break
-                            except NoSuchElementException:
-                                continue
-                        
-                        if not price_container:
-                            logger.warning(f"Price container not found for product: {name}")
-                            continue
-                        
-                        price_elements = price_container.find_elements(By.CSS_SELECTOR, "span.tw-font-bold, span.tw-text-xl, span.tw-text-sm")
-                        price_text = [elem.text for elem in price_elements if elem.text.strip()]
-                        
-                        price = None
-                        for i in range(len(price_text)-1):
-                            try:
-                                euros = price_text[i].replace(',', '.')
-                                cents = price_text[i+1].replace(',', '.')
-                                if euros.replace('.', '').isdigit() and cents.replace('.', '').isdigit():
-                                    price = float(f"{euros}.{cents}")
-                                    break
-                            except (ValueError, IndexError):
-                                continue
-                        
-                        if not price:
-                            logger.warning(f"Could not parse price for product: {name}")
-                            continue
-                        
-                        try:
-                            img_element = product.find_element(By.CSS_SELECTOR, "img")
-                            image_url = img_element.get_attribute("src")
-                        except:
-                            image_url = "https://barbora.ee/Assets/Images/logo-square.png"
-                            logger.warning(f"Image not found for product: {name}")
-                        
+
+                        if not product['status'] == "active":
+                            return result_products
+
+                        price = product['price']
+                        image_url = product['image']
+
                         result_products.append({
                             'name': name,
                             'price': price,
@@ -302,11 +254,8 @@ def get_barbora_items_by_category(category, headers, user_agent):
                 
                 logger.debug(f"Valid products added from page {page}: {valid_products_count}")
                 logger.debug(f"Current total products: {len(result_products)}")
-                
-                if valid_products_count == 0:
-                    logger.info(f"No more products found on page {page}, stopping pagination")
-                    break
-                    
+
+
                 page += 1
                 time.sleep(random_delay(1, 2))
                 
@@ -489,67 +438,105 @@ def get_rimi_items_by_category(category, headers, user_agent):
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
-    
+
     result_products = []
-    
+    page = 1
+
     try:
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        url = f"https://www.rimi.ee{category['link']}?pageSize=100"
-        driver.get(url)
-        
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "product-grid"))
-        )
-        
-        products = driver.find_elements(By.CSS_SELECTOR, "li.product-grid__item")
-        
-        for product in products:
+        logger.debug("Chrome driver successfully initialized")
+
+        while True:
+            url = f"https://www.rimi.ee{category['link']}?pageSize=100&currentPage={page}"
+            logger.debug(f"Loading page: {url}")
+
             try:
-                product_container = product.find_element(By.CLASS_NAME, "js-product-container")
-                product_data = product_container.get_attribute("data-gtm-eec-product")
-                product_json = json.loads(product_data)
+                driver.get(url)
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                    )
+                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+                except Exception as e:
+                    logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
+
+                products = driver.execute_script('''
+                    const targetScript = Array.from(document.querySelectorAll("script")).find(s => 
+                        s.textContent.includes('dataLayer.push') && 
+                        s.textContent.includes('"impressions"') &&
+                        s.textContent.includes('ecommerce')
+                    );
                 
-                name = product.find_element(By.CLASS_NAME, "card__name").text
-                weight_value, unit_name = parse_product_details(name)
+                    const jsonStr = targetScript.textContent
+                        .replace(/\s+/g, ' ')  // Collapse whitespace
+                        .match(/dataLayer\.push\(\s*({.*?})\s*\)/)[1]  // Capture JSON
+                        .replace(/'/g, '"')     // Standardize quotes
+                        .replace(/([{,])(\s*)([A-Za-z_]+)(\s*):/g, '$1"$3":')  // Fix keys
+                        .replace(/,\s*}/g, '}');  // Remove trailing commas
                 
-                price_element = product.find_element(By.CLASS_NAME, "card__price")
-                price_whole = price_element.find_element(By.TAG_NAME, "span").text
-                price_decimal = price_element.find_element(By.TAG_NAME, "sup").text
-                price = float(f"{price_whole}.{price_decimal}")
-                
-                if not unit_name:
+                    return JSON.parse(jsonStr).ecommerce.impressions;
+                ''')
+
+                if len(products) == 0:
+                    logger.info(f"No more products found on page {page}, stopping pagination")
+                    break
+
+                logger.debug(f"Raw products found on page {page}: {len(products)}")
+
+                valid_products_count = 0
+                for product in products:
                     try:
-                        unit_price = product.find_element(By.CLASS_NAME, "card__price-per").text
-                        unit_parts = unit_price.strip().split()
-                        unit_name = unit_parts[-1].replace('€/', '')
-                    except:
-                        unit_name = price_element.find_element(By.TAG_NAME, "sub").text.replace('€/', '')
-                
-                image_url = product.find_element(
-                    By.CSS_SELECTOR, 
-                    ".card__image-wrapper img"
-                ).get_attribute("src")
-                
-                result_products.append({
-                    "name": name,
-                    "price": price,
-                    "image": image_url,
-                    "weight_value": weight_value,
-                    "unit_name": unit_name,
-                    "category": category['title']
-                })
-                
+                        name = product['name']
+
+                        weight_value, unit_name = parse_product_details(name)
+
+                        price = product['price']
+                        image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_limit,dpr_3.0,f_auto,q_auto:low,w_250/d_ecommerce:backend-fallback.png/MAT_{product['id']}_PCE_EE"
+
+                        result_products.append({
+                            'name': name,
+                            'price': price,
+                            'image': image_url,
+                            'weight_value': weight_value,
+                            'unit_name': unit_name
+                        })
+                        valid_products_count += 1
+
+                        logger.debug(f"""
+                            Processing raw item data:
+                            - Name: {name}
+                            - Price: {price}
+                            - Image: {image_url}
+                            - Weight Value: {weight_value}
+                            - Unit Name: {unit_name}
+                        """)
+
+                    except Exception as e:
+                        logger.warning(f"Error parsing product: {str(e)}")
+                        continue
+
+                logger.debug(f"Valid products added from page {page}: {valid_products_count}")
+                logger.debug(f"Current total products: {len(result_products)}")
+
+
+                page += 1
+                time.sleep(random_delay(1, 2))
+
             except Exception as e:
-                logger.warning(f"Error parsing product: {str(e)}")
-                continue
-            
+                logger.error(f"Error loading page: {str(e)}")
+                break
+
     finally:
-        if 'driver' in locals():
-            driver.quit()
-            
+        try:
+            if 'driver' in locals():
+                driver.quit()
+                logger.debug("Chrome driver successfully closed")
+        except Exception as e:
+            logger.error(f"Error while closing driver: {str(e)}")
+
+    logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
 
 def process_item(db: Session, store, item):
