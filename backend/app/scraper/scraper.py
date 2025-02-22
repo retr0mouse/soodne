@@ -82,17 +82,17 @@ def process_store(db: Session, store):
         'Connection': 'keep-alive',
     }
 
-    # Rimi scraping
-    logger.info("Starting Rimi scraping...")
-    get_all_rimi_items(db, store, headers, user_agent)
-    logger.info("Finished Rimi scraping")
-
-
-    # Barbora scraping
-    logger.info("Starting Barbora scraping...")
-    get_all_barbora_items(db, store, headers, user_agent)
-    logger.info("Finished Barbora scraping")
-
+    match store.name:
+        case 'Barbora':
+            logger.info("Starting Barbora scraping...")
+            get_all_barbora_items(db, store, headers, user_agent)
+            logger.info("Finished Barbora scraping")
+        case 'Rimi':
+            logger.info("Starting Rimi scraping...")
+            get_all_rimi_items(db, store, headers, user_agent)
+            logger.info("Finished Rimi scraping")
+        case _:
+            logger.info(f"No scraper for store {store} is implemented")
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
@@ -641,6 +641,3 @@ def get_conversion_factor(unit_name):
         'l': 1000,
     }
     return unit_conversions.get(unit_name, 1)
-
-if __name__ == "__main__":
-    scrape_store_products()
