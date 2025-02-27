@@ -34,6 +34,14 @@ class ProductService:
         return query.offset(skip).limit(limit).all()
 
     def create(self, db: Session, product: schemas.ProductCreate):
+        existing_product = self.get_by_name_and_unit(
+            db, 
+            name=product.name,
+            unit_id=product.unit_id
+        )
+        if existing_product:
+            return existing_product
+        
         db_product = models.Product(**product.dict())
         db.add(db_product)
         db.commit()

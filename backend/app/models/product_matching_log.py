@@ -7,11 +7,11 @@ class ProductMatchingLog(Base):
     __tablename__ = "product_matching_log"
 
     log_id = Column(Integer, primary_key=True, index=True)
-    product_store_id = Column(Integer, ForeignKey("product_store_data.product_store_id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.product_id"), nullable=True)
+    product_id1 = Column(Integer, ForeignKey("products.product_id"), nullable=False)
+    product_id2 = Column(Integer, ForeignKey("products.product_id"), nullable=False)
     confidence_score = Column(DECIMAL(5, 2), nullable=True)
     matched_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     matched_by = Column(String(50), nullable=True)
 
-    product_store_data = relationship("ProductStoreData", back_populates="matching_logs")
-    product = relationship("Product")
+    product1 = relationship("Product", foreign_keys=[product_id1])
+    product2 = relationship("Product", foreign_keys=[product_id2])

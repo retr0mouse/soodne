@@ -25,8 +25,9 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoS
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
-from app.database.models import ProductStoreData
-from app.services.matcher import match_products
+from app.ai.matcher import match_products
+from app.models import Product
+from contextlib import contextmanager
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -41,6 +42,15 @@ def is_allowed(url, user_agent='Soodne/1.0'):
     rp.read()
     return rp.can_fetch(user_agent, url)
 
+@contextmanager
+def store_transaction(db: Session):
+    try:
+        yield
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise e
+
 def scrape_store_products():
     db = SessionLocal()
     try:
@@ -52,7 +62,7 @@ def scrape_store_products():
         }
         
         for store_name, url in stores.items():
-            try:
+            with store_transaction(db):
                 logger.info(f"Processing store: {store_name}")
                 store = store_service.get_by_name(db, name=store_name)
                 if not store:
@@ -65,14 +75,9 @@ def scrape_store_products():
                 process_store(db, store)
                 logger.info(f"Finished processing store: {store_name}")
                 
-            except Exception as e:
-                logger.error(f"Error processing store {store_name}: {str(e)}", exc_info=True)
-                continue
-                
-        logger.info("=== Parsing completed successfully ===")
-        
     except Exception as e:
         logger.error(f"Critical error during parsing process: {str(e)}", exc_info=True)
+        db.rollback()
     finally:
         db.close()
 
@@ -220,7 +225,6 @@ def get_barbora_items_by_category(category, headers, user_agent):
 
                 logger.debug(f"Raw products found on page {page}: {len(products)}")
                 
-                valid_products_count = 0
                 for product in products:
                     try:
                         name = product['title']
@@ -228,10 +232,14 @@ def get_barbora_items_by_category(category, headers, user_agent):
                         weight_value, unit_name = parse_product_details(name)
 
                         if not product['status'] == "active":
-                            return result_products
+                            continue
 
                         price = product['price']
                         image_url = product['image']
+
+                        if not price or float(price) <= 0:
+                            logger.warning(f"Invalid price for product {name}: {price}")
+                            continue
 
                         result_products.append({
                             'name': name,
@@ -240,22 +248,11 @@ def get_barbora_items_by_category(category, headers, user_agent):
                             'weight_value': weight_value,
                             'unit_name': unit_name
                         })
-                        valid_products_count += 1
-                        
-                        logger.debug(f"""
-                            Processing raw item data:
-                            - Name: {name}
-                            - Price: {price}
-                            - Image: {image_url}
-                            - Weight Value: {weight_value}
-                            - Unit Name: {unit_name}
-                        """)
                         
                     except Exception as e:
                         logger.warning(f"Error parsing product: {str(e)}")
                         continue
                 
-                logger.debug(f"Valid products added from page {page}: {valid_products_count}")
                 logger.debug(f"Current total products: {len(result_products)}")
 
 
@@ -314,6 +311,10 @@ def parse_product_details(name):
             try:
                 if weight_str:
                     weight_value = float(weight_str.replace(',', '.'))
+                    if weight_value <= 0:
+                        continue
+                    if weight_value > 100000: 
+                        continue
                 else:
                     weight_value = 1.0
             except (ValueError, TypeError):
@@ -488,7 +489,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
 
                 logger.debug(f"Raw products found on page {page}: {len(products)}")
 
-                valid_products_count = 0
                 for product in products:
                     try:
                         name = product['name']
@@ -498,6 +498,10 @@ def get_rimi_items_by_category(category, headers, user_agent):
                         price = product['price']
                         image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_limit,dpr_3.0,f_auto,q_auto:low,w_250/d_ecommerce:backend-fallback.png/MAT_{product['id']}_PCE_EE"
 
+                        if not price or float(price) <= 0:
+                            logger.warning(f"Invalid price for product {name}: {price}")
+                            continue
+
                         result_products.append({
                             'name': name,
                             'price': price,
@@ -505,22 +509,11 @@ def get_rimi_items_by_category(category, headers, user_agent):
                             'weight_value': weight_value,
                             'unit_name': unit_name
                         })
-                        valid_products_count += 1
-
-                        logger.debug(f"""
-                            Processing raw item data:
-                            - Name: {name}
-                            - Price: {price}
-                            - Image: {image_url}
-                            - Weight Value: {weight_value}
-                            - Unit Name: {unit_name}
-                        """)
 
                     except Exception as e:
                         logger.warning(f"Error parsing product: {str(e)}")
                         continue
 
-                logger.debug(f"Valid products added from page {page}: {valid_products_count}")
                 logger.debug(f"Current total products: {len(result_products)}")
 
 
@@ -546,32 +539,35 @@ def process_item(db: Session, store, item):
     try:
         logger.debug(f"Processing item: {item['name']}")
         
-        new_product_data = {
-            'store_product_name': item['name'],
-            'store_image_url': item['image'],
-            'store_weight_value': item.get('weight_value'),
-            'store_unit_name': item.get('unit_name')
-        }
+        if not item.get('price') or float(item['price']) <= 0:
+            logger.warning(f"Invalid price for item {item['name']}: {item.get('price')}")
+            return
+            
+        similar_products = product_service.get_multi(
+            db,
+            name=item['name'],
+            limit=10  
+        )
         
-        existing_products = product_service.get_multi(db)
         best_match = None
         best_match_score = 0
         
-        for existing_product in existing_products:
-            existing_product_data = ProductStoreData(
-                store_product_name=existing_product.name,
-                store_image_url=existing_product.image_url,
-                store_weight_value=existing_product.weight_value,
-                store_unit_name=existing_product.unit_id
-            )
-            
-            new_product_store_data = ProductStoreData(**new_product_data)
-            
-            matched, confidence = match_products(new_product_store_data, existing_product_data)
+        new_product = Product(
+            name=item['name'],
+            image_url=item['image'],
+            weight_value=item.get('weight_value'),
+            store_id=store.store_id
+        )
+        
+        for existing_product in similar_products:
+            matched, confidence = match_products(new_product, existing_product)
             
             if matched and confidence > best_match_score:
                 best_match = existing_product
                 best_match_score = confidence
+                
+                if confidence > 95:
+                    break
         
         if best_match and best_match_score > 80:
             product = best_match
@@ -581,19 +577,25 @@ def process_item(db: Session, store, item):
                 name=item['name'],
                 image_url=item['image'],
                 weight_value=item.get('weight_value'),
-                unit_id=None
+                unit_id=None,
+                store_id=store.store_id
             )
             product = product_service.create(db, product=product_data)
             logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
 
-        price_record = product_price_service.create_or_update(
-            db,
-            product_id=product.product_id,
-            store_id=store.store_id,
-            price=item['price']
-        )
-        logger.debug(f"Price record created/updated: {price_record.price}")
-        
+        try:
+            price_record = product_price_service.create_or_update(
+                db,
+                product_id=product.product_id,
+                store_id=store.store_id,
+                price=float(item['price'])
+            )
+            logger.debug(f"Price record created/updated: {price_record.price}")
+        except ValueError as e:
+            logger.error(f"Price error for {item['name']}: {str(e)}")
+            db.rollback()
+            return
+            
     except Exception as e:
         logger.error(f"Error processing item {item['name']}: {str(e)}", exc_info=True)
         db.rollback()

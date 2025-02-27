@@ -13,4 +13,3 @@ class Unit(Base):
     updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())
 
     products = relationship("Product", back_populates="unit")
-    product_store_data = relationship("ProductStoreData", back_populates="store_unit")

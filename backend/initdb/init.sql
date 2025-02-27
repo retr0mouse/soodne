@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS products (
     unit_id INTEGER,
     category_id INTEGER,
     barcode VARCHAR(50) UNIQUE,
+    matching_status matching_status_enum DEFAULT 'unmatched',
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     CONSTRAINT fk_unit
@@ -135,21 +136,23 @@ CREATE INDEX IF NOT EXISTS idx_product_prices_created_at
 
 CREATE TABLE IF NOT EXISTS product_matching_log (
     log_id SERIAL PRIMARY KEY,
-    product_store_id INTEGER NOT NULL,
-    product_id INTEGER,
+    product_id1 INTEGER NOT NULL,
+    product_id2 INTEGER NOT NULL,
     confidence_score DECIMAL(5, 2),
     matched_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     matched_by VARCHAR(50),
-    CONSTRAINT fk_product_store_log
-        FOREIGN KEY (product_store_id)
-            REFERENCES product_store_data (product_store_id),
-    CONSTRAINT fk_product_log
-        FOREIGN KEY (product_id)
+    CONSTRAINT fk_product1_log
+        FOREIGN KEY (product_id1)
             REFERENCES products (product_id)
+            ON DELETE CASCADE,
+    CONSTRAINT fk_product2_log
+        FOREIGN KEY (product_id2)
+            REFERENCES products (product_id)
+            ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_product_matching_log_product_id
-    ON product_matching_log (product_id);
+CREATE INDEX IF NOT EXISTS idx_product_matching_log_product_ids
+    ON product_matching_log (product_id1, product_id2);
 
 CREATE INDEX IF NOT EXISTS idx_product_matching_log_confidence_score
     ON product_matching_log (confidence_score);

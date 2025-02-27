@@ -13,4 +13,5 @@ class Store(Base):
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())
 
-    product_store_data = relationship("ProductStoreData", back_populates="store")
+    products = relationship("Product", back_populates="store")
+    prices = relationship("ProductPrice", back_populates="store")

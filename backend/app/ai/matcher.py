@@ -51,21 +51,19 @@ def get_image_embedding(url: str) -> np.ndarray:
         logger.error(f"Error processing image from URL {url}: {e}")
         return np.zeros(512)
 
-def compare_weight(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> float:
-    if not psd1.store_weight_value or not psd2.store_weight_value:
+def compare_weight(weight1: float, weight2: float) -> float:
+    if not weight1 or not weight2:
         return 0
     try:
-        weight1 = float(psd1.store_weight_value)
-        weight2 = float(psd2.store_weight_value)
         tolerance = 0.05
         return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
     except Exception as e:
         logger.error(f"Error comparing weights: {e}")
         return 0
 
-def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> Tuple[bool, float]:
-    name1 = preprocess_name(psd1.store_product_name)
-    name2 = preprocess_name(psd2.store_product_name)
+def match_products(product1: models.Product, product2: models.Product, threshold: float = 80.0) -> Tuple[bool, float]:
+    name1 = preprocess_name(product1.name)
+    name2 = preprocess_name(product2.name)
 
     name_embedding1 = sentence_model.encode(name1)
     name_embedding2 = sentence_model.encode(name2)
@@ -75,13 +73,14 @@ def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
     name_similarity = cosine_sim * 100
 
     fuzzy_similarity = fuzz.token_set_ratio(name1, name2)
-
+    
     combined_name_similarity = (name_similarity * 0.7) + (fuzzy_similarity * 0.3)
 
-    weight_match = compare_weight(psd1, psd2)
+    weight_match = compare_weight(product1.weight_value, product2.weight_value)
 
-    image_embedding1 = get_image_embedding(psd1.store_image_url)
-    image_embedding2 = get_image_embedding(psd2.store_image_url)
+    image_embedding1 = get_image_embedding(product1.image_url) if product1.image_url else np.zeros(512)
+    image_embedding2 = get_image_embedding(product2.image_url) if product2.image_url else np.zeros(512)
+    
     if np.linalg.norm(image_embedding1) == 0 or np.linalg.norm(image_embedding2) == 0:
         image_similarity = 0
     else:
@@ -91,31 +90,40 @@ def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
         image_similarity = image_cosine_sim * 100
 
     total_score = (combined_name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
-    matched = total_score > 80
+    matched = total_score > threshold
 
     return matched, round(total_score, 2)
 
 def run_ai_matching():
+    BATCH_SIZE = 100
+    
     with SessionLocal() as db:
-        unmatched_psds = db.query(models.ProductStoreData).filter(
-            models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
-        ).all()
-        for psd in unmatched_psds:
-            similar_psds = db.query(models.ProductStoreData).filter(
-                models.ProductStoreData.store_id != psd.store_id,
-                models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
-            ).all()
-            for similar_psd in similar_psds:
-                matched, confidence = match_products(psd, similar_psd)
-                if matched:
-                    psd.matching_status = schemas.MatchingStatusEnum.matched
-                    similar_psd.matching_status = schemas.MatchingStatusEnum.matched
-                    log = schemas.ProductMatchingLogCreate(
-                        product_store_id=psd.product_store_id,
-                        product_id=similar_psd.product_id,
-                        confidence_score=confidence,
-                        matched_by="ai_matcher"
-                    )
-                    product_matching_log_service.create(db, log=log)
-                    db.commit()
-                    break
+        while True:
+            unmatched_products = db.query(models.Product).filter(
+                models.Product.matching_status == schemas.MatchingStatusEnum.unmatched
+            ).limit(BATCH_SIZE).all()
+            
+            if not unmatched_products:
+                break
+                
+            for product1 in unmatched_products:
+                potential_matches = db.query(models.Product).filter(
+                    models.Product.matching_status == schemas.MatchingStatusEnum.unmatched,
+                    models.Product.product_id != product1.product_id,
+                    models.Product.name.ilike(f"%{product1.name[:30]}%")
+                ).all()
+                
+                for product2 in potential_matches:
+                    matched, confidence = match_products(product1, product2)
+                    if matched:
+                        product1.matching_status = schemas.MatchingStatusEnum.matched
+                        product2.matching_status = schemas.MatchingStatusEnum.matched
+                        log = schemas.ProductMatchingLogCreate(
+                            product_id1=product1.id,
+                            product_id2=product2.id,
+                            confidence_score=confidence,
+                            matched_by="ai_matcher"
+                        )
+                        product_matching_log_service.create(db, log=log)
+                        db.commit()
+                        break

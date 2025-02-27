@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app import schemas
-from app.services import product_store_data_service, product_matching_log_service
+from app.services import product_service, product_matching_log_service
 from app.ai.matcher import match_products
 from app.api import deps
 from app.core.jobs import scheduled_job
@@ -13,25 +13,25 @@ logger = logging.getLogger(__name__)
 
 @router.post("/match", response_model=schemas.ProductMatchingLog)
 def match_two_products(
-        product_store_id1: int,
-        product_store_id2: int,
+        product_id1: int,
+        product_id2: int,
         db: Session = Depends(deps.get_db)
 ):
-    psd1 = product_store_data_service.get(db, product_store_id=product_store_id1)
-    psd2 = product_store_data_service.get(db, product_store_id=product_store_id2)
-    if not psd1 or not psd2:
-        raise HTTPException(status_code=404, detail="ProductStoreData not found")
+    product1 = product_service.get(db, product_id=product_id1)
+    product2 = product_service.get(db, product_id=product_id2)
+    if not product1 or not product2:
+        raise HTTPException(status_code=404, detail="Product not found")
 
-    matched, confidence = match_products(psd1, psd2)
+    matched, confidence = match_products(product1, product2)
 
     if matched:
-        psd1.matching_status = schemas.MatchingStatusEnum.matched
-        psd2.matching_status = schemas.MatchingStatusEnum.matched
+        product1.matching_status = schemas.MatchingStatusEnum.matched
+        product2.matching_status = schemas.MatchingStatusEnum.matched
         db.commit()
 
         log = schemas.ProductMatchingLogCreate(
-            product_store_id=product_store_id1,
-            product_id=psd2.product_id,
+            product_id1=product_id1,
+            product_id2=product_id2,
             confidence_score=confidence,
             matched_by="api_matcher"
         )
@@ -40,8 +40,8 @@ def match_two_products(
     else:
         return schemas.ProductMatchingLog(
             log_id=0,
-            product_store_id=product_store_id1,
-            product_id=None,
+            product_id1=product_id1,
+            product_id2=product_id2,
             confidence_score=confidence,
             matched_at=None,
             matched_by="api_matcher"
