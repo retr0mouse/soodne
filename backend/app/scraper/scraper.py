@@ -7,7 +7,8 @@ from app.services import (
     store_service,
     unit_service,
     product_service,
-    product_store_data_service
+    product_store_data_service,
+    product_price_service
 )
 import random
 import time
@@ -24,6 +25,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoS
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
+from app.database.models import ProductStoreData
+from app.services.matcher import match_products
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -540,85 +543,62 @@ def get_rimi_items_by_category(category, headers, user_agent):
     return result_products
 
 def process_item(db: Session, store, item):
-    logger.debug(f"""
-    Processing raw item data:
-    - Name: {item['name']}
-    - Price: {item['price']}
-    - Image: {item['image']}
-    - Category: {item.get('category', 'N/A')}
-    - Weight Value: {item.get('weight_value', 'N/A')}
-    - Unit Name: {item.get('unit_name', 'N/A')}
-    """)
-
-    weight_value = item.get('weight_value')
-    unit_name = item.get('unit_name')
-    
-    if weight_value and unit_name:
-        unit = unit_service.get_by_name(db, name=unit_name)
-        if not unit:
-            unit_data = schemas.UnitCreate(
-                name=unit_name,
-                conversion_factor=get_conversion_factor(unit_name)
+    try:
+        logger.debug(f"Processing item: {item['name']}")
+        
+        new_product_data = {
+            'store_product_name': item['name'],
+            'store_image_url': item['image'],
+            'store_weight_value': item.get('weight_value'),
+            'store_unit_name': item.get('unit_name')
+        }
+        
+        existing_products = product_service.get_multi(db)
+        best_match = None
+        best_match_score = 0
+        
+        for existing_product in existing_products:
+            existing_product_data = ProductStoreData(
+                store_product_name=existing_product.name,
+                store_image_url=existing_product.image_url,
+                store_weight_value=existing_product.weight_value,
+                store_unit_name=existing_product.unit_id
             )
-            unit = unit_service.create(db, unit=unit_data)
-            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
+            
+            new_product_store_data = ProductStoreData(**new_product_data)
+            
+            matched, confidence = match_products(new_product_store_data, existing_product_data)
+            
+            if matched and confidence > best_match_score:
+                best_match = existing_product
+                best_match_score = confidence
+        
+        if best_match and best_match_score > 80:
+            product = best_match
+            logger.debug(f"Found matching product: {product.name} (ID: {product.product_id}) with confidence: {best_match_score}")
+        else:
+            product_data = schemas.ProductCreate(
+                name=item['name'],
+                image_url=item['image'],
+                weight_value=item.get('weight_value'),
+                unit_id=None
+            )
+            product = product_service.create(db, product=product_data)
+            logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
+
+        price_record = product_price_service.create_or_update(
+            db,
+            product_id=product.product_id,
+            store_id=store.store_id,
+            price=item['price']
+        )
+        logger.debug(f"Price record created/updated: {price_record.price}")
+        
+    except Exception as e:
+        logger.error(f"Error processing item {item['name']}: {str(e)}", exc_info=True)
+        db.rollback()
     else:
-        unit = None
-        logger.debug("No unit information available for this product")
-
-    product_data = schemas.ProductCreate(
-        name=item['name'],
-        image_url=item['image'],
-        weight_value=weight_value,
-        unit_id=unit.unit_id if unit else None
-    )
-    
-    product = product_service.get_by_name_and_unit(db, name=item['name'], unit_id=unit.unit_id if unit else None)
-    if not product:
-        product = product_service.create(db, product=product_data)
-        logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
-    else:
-        logger.debug(f"Found existing product: {product.name} (ID: {product.product_id})")
-
-    psd_data = schemas.ProductStoreDataCreate(
-        product_id=product.product_id,
-        store_id=store.store_id,
-        price=item['price'],
-        store_product_name=item['name'],
-        store_image_url=item['image'],
-        store_weight_value=weight_value,
-        store_unit_id=unit.unit_id if unit else None
-    )
-
-    existing_psd = product_store_data_service.get_by_product_and_store(
-        db, 
-        product_id=product.product_id, 
-        store_id=store.store_id
-    )
-    
-    if existing_psd:
-        old_price = existing_psd.price
-        existing_psd.price = item['price']
-        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
         db.commit()
-        logger.debug(f"""
-        Updated existing store data:
-        - Product: {item['name']}
-        - Old price: {old_price}
-        - New price: {item['price']}
-        - Last updated: {existing_psd.last_updated}
-        """)
-    else:
-        new_psd = product_store_data_service.create(db, psd=psd_data)
-        logger.debug(f"""
-        Created new store data:
-        - Product: {item['name']}
-        - Price: {item['price']}
-        - Store: {store.name}
-        - Product ID: {new_psd.product_id}
-        """)
-
-    logger.debug("=" * 50)
 
 def parse_weight(weight_str):
     if not weight_str:
