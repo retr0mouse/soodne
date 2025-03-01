@@ -10,6 +10,7 @@ class ProductStoreDataBase(BaseModel):
     price_per_unit: Optional[float] = None
     store_product_name: Optional[str] = None
     store_weight_value: Optional[float] = None
+    store_image_url: Optional[str] = None
     store_unit_id: Optional[int] = None
     additional_attributes: Optional[Dict] = None
     matching_status: Optional[MatchingStatusEnum] = MatchingStatusEnum.unmatched

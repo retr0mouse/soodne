@@ -586,6 +586,7 @@ def process_item(db: Session, store, item):
         price=item['price'],
         store_product_name=item['name'],
         store_weight_value=weight_value,
+        store_image_url=item['image'],
         store_unit_id=unit.unit_id if unit else None
     )
 

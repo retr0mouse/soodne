@@ -16,6 +16,7 @@ class ProductStoreData(Base):
     price_per_unit = Column(DECIMAL(10, 2), nullable=True)
     last_updated = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
     store_product_name = Column(String(255))
+    store_image_url = Column(Text, nullable=True)
     store_weight_value = Column(DECIMAL(10, 2), nullable=True)
     store_unit_id = Column(Integer, ForeignKey("units.unit_id"))
     additional_attributes = Column(JSON, nullable=True)

@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS product_store_data (
     price_per_unit DECIMAL(10, 2) CHECK (price_per_unit >= 0),
     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     store_product_name VARCHAR(255),
+    store_image_url TEXT,
     store_weight_value DECIMAL(10, 2) CHECK (store_weight_value >= 0),
     store_unit_id INTEGER,
     ean VARCHAR(13), 
