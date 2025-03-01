@@ -4,7 +4,7 @@ from datetime import datetime
 from .enums import MatchingStatusEnum
 
 class ProductStoreDataBase(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
     store_id: int
     price: float
     price_per_unit: Optional[float] = None
