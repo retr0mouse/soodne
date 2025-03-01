@@ -13,6 +13,12 @@ class ProductStoreDataService:
             models.ProductStoreData.store_id == store_id
         ).first()
 
+    def get_by_store_product_name_and_store(self, db: Session, store_product_name: str, store_id: int):
+        return db.query(models.ProductStoreData).filter(
+            models.ProductStoreData.store_product_name == store_product_name,
+            models.ProductStoreData.store_id == store_id
+        ).first()
+
     def create(self, db: Session, psd: schemas.ProductStoreDataCreate):
         db_psd = models.ProductStoreData(**psd.dict())
         db.add(db_psd)
