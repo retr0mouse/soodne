@@ -94,7 +94,7 @@ CREATE INDEX IF NOT EXISTS idx_products_fulltext
 
 CREATE TABLE IF NOT EXISTS product_store_data (
     product_store_id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL,
+    product_id INTEGER,
     store_id INTEGER NOT NULL,
     price DECIMAL(10, 2) NOT NULL CHECK (price >= 0),
     price_per_unit DECIMAL(10, 2) CHECK (price_per_unit >= 0),
@@ -177,13 +177,16 @@ EXECUTE PROCEDURE update_last_updated();
 CREATE OR REPLACE FUNCTION reset_matching_status()
 RETURNS TRIGGER AS $$
 BEGIN
-   IF NEW.store_product_name <> OLD.store_product_name
-       OR NEW.store_image_url <> OLD.store_image_url
-       OR NEW.ean <> OLD.ean THEN
-       NEW.matching_status = 'unmatched';
-       NEW.product_id = NULL;
-   END IF;
-   RETURN NEW;
+    IF NEW.store_product_name <> OLD.store_product_name
+        OR NEW.store_image_url <> OLD.store_image_url
+        OR NEW.ean <> OLD.ean
+        OR NEW.store_weight_value <> OLD.store_weight_value
+        OR NEW.store_unit_id <> OLD.store_unit_id THEN
+        NEW.matching_status = 'unmatched';
+        NEW.product_id = NULL;
+        NEW.last_matched = NULL;
+    END IF;
+    RETURN NEW;
 END;    
 $$ LANGUAGE plpgsql;
 
@@ -246,3 +249,11 @@ CREATE INDEX IF NOT EXISTS idx_product_matching_log_product_id
 
 CREATE INDEX IF NOT EXISTS idx_product_matching_log_confidence_score
     ON product_matching_log (confidence_score);
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_unmatched
+    ON product_store_data (matching_status, product_id)
+    WHERE product_id IS NULL AND matching_status = 'unmatched';
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_potential_matches
+    ON product_store_data (store_id, product_id)
+    WHERE product_id IS NOT NULL;
