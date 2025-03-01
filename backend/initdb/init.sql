@@ -154,10 +154,6 @@ CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_name_trgm
     ON product_store_data
     USING GIN (store_product_name gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS idx_productstoredata_store_description_trgm
-    ON product_store_data
-    USING GIN (store_description gin_trgm_ops);
-
 CREATE INDEX IF NOT EXISTS idx_productstoredata_ean
     ON product_store_data (ean);
 
@@ -181,7 +177,6 @@ CREATE OR REPLACE FUNCTION reset_matching_status()
 RETURNS TRIGGER AS $$
 BEGIN
    IF NEW.store_product_name <> OLD.store_product_name
-       OR NEW.store_description <> OLD.store_description
        OR NEW.store_image_url <> OLD.store_image_url
        OR NEW.ean <> OLD.ean THEN
        NEW.matching_status = 'unmatched';
