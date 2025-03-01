@@ -553,6 +553,7 @@ def process_item(db: Session, store, item):
     weight_value = item.get('weight_value')
     unit_name = item.get('unit_name')
     
+    unit = None
     if weight_value and unit_name:
         unit = unit_service.get_by_name(db, name=unit_name)
         if not unit:
@@ -562,44 +563,30 @@ def process_item(db: Session, store, item):
             )
             unit = unit_service.create(db, unit=unit_data)
             logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
-    else:
-        unit = None
-        logger.debug("No unit information available for this product")
 
-    product_data = schemas.ProductCreate(
-        name=item['name'],
-        image_url=item['image'],
-        weight_value=weight_value,
-        unit_id=unit.unit_id if unit else None
+    # Create or update ProductStoreData entry
+    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
+        db,
+        store_product_name=item['name'],
+        store_id=store.store_id
     )
-    
-    product = product_service.get_by_name_and_unit(db, name=item['name'], unit_id=unit.unit_id if unit else None)
-    if not product:
-        product = product_service.create(db, product=product_data)
-        logger.debug(f"Created new product: {product.name} (ID: {product.product_id})")
-    else:
-        logger.debug(f"Found existing product: {product.name} (ID: {product.product_id})")
 
     psd_data = schemas.ProductStoreDataCreate(
-        product_id=product.product_id,
+        product_id=None,  # Initially null, will be set by matcher
         store_id=store.store_id,
         price=item['price'],
         store_product_name=item['name'],
         store_weight_value=weight_value,
         store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None
+        store_unit_id=unit.unit_id if unit else None,
+        matching_status=schemas.MatchingStatusEnum.unmatched
     )
 
-    existing_psd = product_store_data_service.get_by_product_and_store(
-        db, 
-        product_id=product.product_id, 
-        store_id=store.store_id
-    )
-    
     if existing_psd:
         old_price = existing_psd.price
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
+        existing_psd.matching_status = schemas.MatchingStatusEnum.unmatched
         db.commit()
         logger.debug(f"""
         Updated existing store data:
@@ -615,7 +602,7 @@ def process_item(db: Session, store, item):
         - Product: {item['name']}
         - Price: {item['price']}
         - Store: {store.name}
-        - Product ID: {new_psd.product_id}
+        - Product Store ID: {new_psd.product_store_id}
         """)
 
     logger.debug("=" * 50)

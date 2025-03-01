@@ -11,10 +11,11 @@ from rapidfuzz import fuzz
 import requests
 from io import BytesIO
 import re
+from sqlalchemy import func
 
 from app import models, schemas
 from app.database.database import SessionLocal
-from app.services import product_matching_log_service
+from app.services import product_matching_log_service, product_service
 
 logger = logging.getLogger(__name__)
 
@@ -87,25 +88,63 @@ def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
 
 def run_ai_matching():
     with SessionLocal() as db:
+        # Get all unmatched product store data entries
         unmatched_psds = db.query(models.ProductStoreData).filter(
+            models.ProductStoreData.product_id.is_(None),
             models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
         ).all()
+
         for psd in unmatched_psds:
-            similar_psds = db.query(models.ProductStoreData).filter(
+            # Look for potential matches among existing products' store data
+            potential_matches = db.query(models.ProductStoreData).filter(
                 models.ProductStoreData.store_id != psd.store_id,
-                models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
+                models.ProductStoreData.product_id.isnot(None)
             ).all()
-            for similar_psd in similar_psds:
-                matched, confidence = match_products(psd, similar_psd)
-                if matched:
-                    psd.matching_status = schemas.MatchingStatusEnum.matched
-                    similar_psd.matching_status = schemas.MatchingStatusEnum.matched
-                    log = schemas.ProductMatchingLogCreate(
-                        product_store_id=psd.product_store_id,
-                        product_id=similar_psd.product_id,
-                        confidence_score=confidence,
-                        matched_by="ai_matcher"
-                    )
-                    product_matching_log_service.create(db, log=log)
-                    db.commit()
-                    break
+
+            best_match = None
+            best_confidence = 0
+
+            # Find the best match among existing products
+            for potential_match in potential_matches:
+                matched, confidence = match_products(psd, potential_match)
+                if matched and confidence > best_confidence:
+                    best_match = potential_match
+                    best_confidence = confidence
+
+            if best_match:
+                # Match found - link to existing product
+                psd.product_id = best_match.product_id
+                psd.matching_status = schemas.MatchingStatusEnum.matched
+                psd.last_matched = func.now()
+
+                log = schemas.ProductMatchingLogCreate(
+                    product_store_id=psd.product_store_id,
+                    product_id=best_match.product_id,
+                    confidence_score=best_confidence,
+                    matched_by="ai_matcher"
+                )
+                product_matching_log_service.create(db, log=log)
+            else:
+                # No match found - create new product
+                new_product = schemas.ProductCreate(
+                    name=psd.store_product_name,
+                    image_url=psd.store_image_url,
+                    weight_value=psd.store_weight_value,
+                    unit_id=psd.store_unit_id
+                )
+                created_product = product_service.create(db, product=new_product)
+
+                # Link the store data to the new product
+                psd.product_id = created_product.product_id
+                psd.matching_status = schemas.MatchingStatusEnum.matched
+                psd.last_matched = func.now()
+
+                log = schemas.ProductMatchingLogCreate(
+                    product_store_id=psd.product_store_id,
+                    product_id=created_product.product_id,
+                    confidence_score=100.0,  # New product creation has 100% confidence
+                    matched_by="ai_matcher_new_product"
+                )
+                product_matching_log_service.create(db, log=log)
+
+            db.commit()
