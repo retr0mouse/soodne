@@ -13,15 +13,8 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE IF NOT EXISTS units (
     unit_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
-    conversion_factor DECIMAL(10, 6) NOT NULL,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+    conversion_factor DECIMAL(10, 6) NOT NULL
 );
-
-CREATE TRIGGER trg_update_units_updated_at
-BEFORE UPDATE ON units
-FOR EACH ROW
-EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE IF NOT EXISTS categories (
     category_id SERIAL PRIMARY KEY,
@@ -53,15 +46,8 @@ CREATE TABLE IF NOT EXISTS stores (
     store_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL UNIQUE,
     website_url TEXT,
-    image_url TEXT,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+    image_url TEXT
 );
-
-CREATE TRIGGER trg_update_stores_updated_at
-BEFORE UPDATE ON stores
-FOR EACH ROW
-EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE IF NOT EXISTS products (
     product_id SERIAL PRIMARY KEY,
@@ -114,8 +100,6 @@ CREATE TABLE IF NOT EXISTS product_store_data (
     price_per_unit DECIMAL(10, 2) CHECK (price_per_unit >= 0),
     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     store_product_name VARCHAR(255),
-    store_description TEXT,
-    store_image_url TEXT,
     store_weight_value DECIMAL(10, 2) CHECK (store_weight_value >= 0),
     store_unit_id INTEGER,
     ean VARCHAR(13), 

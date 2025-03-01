@@ -1,5 +1,4 @@
 from pydantic import BaseModel
-from datetime import datetime
 
 class UnitBase(BaseModel):
     name: str
@@ -10,8 +9,6 @@ class UnitCreate(UnitBase):
 
 class Unit(UnitBase):
     unit_id: int
-    created_at: datetime
-    updated_at: datetime
 
     class Config:
         orm_mode = True

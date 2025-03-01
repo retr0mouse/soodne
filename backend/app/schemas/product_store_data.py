@@ -9,8 +9,6 @@ class ProductStoreDataBase(BaseModel):
     price: float
     price_per_unit: Optional[float] = None
     store_product_name: Optional[str] = None
-    store_description: Optional[str] = None
-    store_image_url: Optional[str] = None
     store_weight_value: Optional[float] = None
     store_unit_id: Optional[int] = None
     additional_attributes: Optional[Dict] = None

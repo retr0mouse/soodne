@@ -80,17 +80,7 @@ def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
 
     weight_match = compare_weight(psd1, psd2)
 
-    image_embedding1 = get_image_embedding(psd1.store_image_url)
-    image_embedding2 = get_image_embedding(psd2.store_image_url)
-    if np.linalg.norm(image_embedding1) == 0 or np.linalg.norm(image_embedding2) == 0:
-        image_similarity = 0
-    else:
-        image_cosine_sim = np.dot(image_embedding1, image_embedding2) / (
-                np.linalg.norm(image_embedding1) * np.linalg.norm(image_embedding2)
-        )
-        image_similarity = image_cosine_sim * 100
-
-    total_score = (combined_name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
+    total_score = (combined_name_similarity * 0.7) + (weight_match * 0.3)
     matched = total_score > 80
 
     return matched, round(total_score, 2)
