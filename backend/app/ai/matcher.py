@@ -65,24 +65,71 @@ def compare_weight(psd1: models.ProductStoreData, psd2: models.ProductStoreData)
         return 0
 
 def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> Tuple[bool, float]:
-    name1 = preprocess_name(psd1.store_product_name)
-    name2 = preprocess_name(psd2.store_product_name)
+    # If EAN codes are available and match, it's a definite match
+    if psd1.ean and psd2.ean and psd1.ean == psd2.ean:
+        return True, 100.0
 
-    name_embedding1 = sentence_model.encode(name1)
-    name_embedding2 = sentence_model.encode(name2)
-    cosine_sim = np.dot(name_embedding1, name_embedding2) / (
-            np.linalg.norm(name_embedding1) * np.linalg.norm(name_embedding2)
-    )
-    name_similarity = cosine_sim * 100
-
-    fuzzy_similarity = fuzz.token_set_ratio(name1, name2)
-
-    combined_name_similarity = (name_similarity * 0.7) + (fuzzy_similarity * 0.3)
-
+    # Compare units and weights if available
     weight_match = compare_weight(psd1, psd2)
+    if psd1.store_unit_id and psd2.store_unit_id and psd1.store_unit_id != psd2.store_unit_id:
+        return False, 0.0
 
-    total_score = (combined_name_similarity * 0.7) + (weight_match * 0.3)
-    matched = total_score > 80
+    # Get base product names by removing common descriptors
+    name1 = psd1.store_product_name.lower()
+    name2 = psd2.store_product_name.lower()
+    
+    # Use ML model to get semantic embeddings
+    emb1 = sentence_model.encode(name1)
+    emb2 = sentence_model.encode(name2)
+    semantic_sim = float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))) * 100
+
+    # If semantic similarity is too low, they're different products
+    if semantic_sim < 50:  # Products are semantically very different
+        return False, 0.0
+
+    # Calculate trigram similarity using database
+    with SessionLocal() as db:
+        trigram_sim = db.execute(
+            """
+            SELECT similarity(LOWER(:name1), LOWER(:name2)) * 100 as sim
+            """,
+            {"name1": name1, "name2": name2}
+        ).scalar()
+
+    # Get token sort ratio for more precise comparison
+    token_sim = fuzz.token_sort_ratio(name1, name2)
+    
+    # Extract main product type (last word before unit)
+    def get_product_type(name: str) -> str:
+        # Remove unit if present
+        name = re.sub(r'\s*,\s*kg$|\s*kg$', '', name)
+        # Get last word before any descriptors
+        words = name.split()
+        if len(words) > 0:
+            return words[-1]
+        return name
+
+    prod_type1 = get_product_type(name1)
+    prod_type2 = get_product_type(name2)
+
+    # If main product types are different, they're different products
+    if prod_type1 != prod_type2:
+        type_sim = fuzz.ratio(prod_type1, prod_type2)
+        if type_sim < 80:  # Allow some fuzzy matching for typos
+            return False, 0.0
+
+    # Calculate final similarity score with weighted components
+    name_similarity = (
+        semantic_sim * 0.4 +
+        trigram_sim * 0.3 +     
+        token_sim * 0.3           
+    )
+
+    # Final score combining name and weight matching
+    total_score = (name_similarity * 0.8) + (weight_match * 0.2)
+
+    # Require very high confidence for matching
+    matched = total_score > 95
 
     return matched, round(total_score, 2)
 
@@ -95,16 +142,59 @@ def run_ai_matching():
         ).all()
 
         for psd in unmatched_psds:
-            # Look for potential matches among existing products' store data
-            potential_matches = db.query(models.ProductStoreData).filter(
-                models.ProductStoreData.store_id != psd.store_id,
-                models.ProductStoreData.product_id.isnot(None)
-            ).all()
+            # First try to find exact EAN matches
+            if psd.ean:
+                exact_match = db.query(models.ProductStoreData).filter(
+                    models.ProductStoreData.store_id != psd.store_id,
+                    models.ProductStoreData.product_id.isnot(None),
+                    models.ProductStoreData.ean == psd.ean
+                ).first()
+                
+                if exact_match:
+                    psd.product_id = exact_match.product_id
+                    psd.matching_status = schemas.MatchingStatusEnum.matched
+                    psd.last_matched = func.now()
+                    
+                    log = schemas.ProductMatchingLogCreate(
+                        product_store_id=psd.product_store_id,
+                        product_id=exact_match.product_id,
+                        confidence_score=100.0,
+                        matched_by="ean_matcher"
+                    )
+                    product_matching_log_service.create(db, log=log)
+                    db.commit()
+                    continue
+
+            # Find potential matches using both trigram and semantic similarity
+            store_name = psd.store_product_name.lower()
+            
+            # Get base product type
+            product_type = store_name.split()[-1].strip(',.') if store_name else ''
+            
+            # Find potential matches with similar names
+            potential_matches = db.execute(
+                """
+                SELECT psd.* 
+                FROM product_store_data psd
+                WHERE psd.store_id != :store_id
+                AND psd.product_id IS NOT NULL
+                AND (
+                    similarity(LOWER(psd.store_product_name), LOWER(:name)) > 0.3
+                    OR LOWER(psd.store_product_name) LIKE '%' || :product_type || '%'
+                )
+                ORDER BY similarity(LOWER(psd.store_product_name), LOWER(:name)) DESC
+                LIMIT 5
+                """,
+                {
+                    "store_id": psd.store_id,
+                    "name": store_name,
+                    "product_type": product_type
+                }
+            ).fetchall()
 
             best_match = None
             best_confidence = 0
 
-            # Find the best match among existing products
             for potential_match in potential_matches:
                 matched, confidence = match_products(psd, potential_match)
                 if matched and confidence > best_confidence:
@@ -112,7 +202,6 @@ def run_ai_matching():
                     best_confidence = confidence
 
             if best_match:
-                # Match found - link to existing product
                 psd.product_id = best_match.product_id
                 psd.matching_status = schemas.MatchingStatusEnum.matched
                 psd.last_matched = func.now()
@@ -121,7 +210,7 @@ def run_ai_matching():
                     product_store_id=psd.product_store_id,
                     product_id=best_match.product_id,
                     confidence_score=best_confidence,
-                    matched_by="ai_matcher"
+                    matched_by="hybrid_matcher"
                 )
                 product_matching_log_service.create(db, log=log)
             else:
@@ -134,7 +223,6 @@ def run_ai_matching():
                 )
                 created_product = product_service.create(db, product=new_product)
 
-                # Link the store data to the new product
                 psd.product_id = created_product.product_id
                 psd.matching_status = schemas.MatchingStatusEnum.matched
                 psd.last_matched = func.now()
@@ -142,8 +230,8 @@ def run_ai_matching():
                 log = schemas.ProductMatchingLogCreate(
                     product_store_id=psd.product_store_id,
                     product_id=created_product.product_id,
-                    confidence_score=100.0,  # New product creation has 100% confidence
-                    matched_by="ai_matcher_new_product"
+                    confidence_score=100.0,
+                    matched_by="new_product_creation"
                 )
                 product_matching_log_service.create(db, log=log)
 
