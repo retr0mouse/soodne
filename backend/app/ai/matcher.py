@@ -51,19 +51,36 @@ def preprocess_text(t: str) -> str:
     # Convert to lowercase
     text = t.lower().strip()
     
+    # Store original size information for later use
+    size_info = re.search(r'\b(\d+\s*(ml|l|g|kg))\b', text, flags=re.IGNORECASE)
+    size_value = size_info.group(1) if size_info else ""
+    
     # Remove specific product variations that shouldn't affect matching
     text = re.sub(r'\s*\d+\s*x\s*', ' ', text)  # Remove quantity indicators like "6x"
-    text = re.sub(r'\s*\d+\s*(ml|l|g|kg)\s*', ' ', text, flags=re.IGNORECASE)  # Remove size indicators
-    text = re.sub(r'\s*\([^)]*\)\s*', ' ', text)  # Remove parentheses and their contents
+    
+    # Normalize size indicators instead of removing them completely
+    text = re.sub(r'\b(\d+)\s*(ml)\b', r'ml', text, flags=re.IGNORECASE)  # Replace "250 ml" with "ml"
+    text = re.sub(r'\b(\d+)\s*(l)\b', r'l', text, flags=re.IGNORECASE)   # Replace "1.5 l" with "l"
+    text = re.sub(r'\b(\d+)\s*(g)\b', r'g', text, flags=re.IGNORECASE)   # Replace "500 g" with "g"
+    text = re.sub(r'\b(\d+)\s*(kg)\b', r'kg', text, flags=re.IGNORECASE) # Replace "1 kg" with "kg"
+    
+    # Be more selective about removing parentheses content
+    text = re.sub(r'\s*\([^)]*[0-9][^)]*\)\s*', ' ', text)  # Only remove parentheses with numbers
     text = re.sub(r'@.*$', '', text)  # Remove @ and everything after it
     
     # Normalize spaces
     text = re.sub(r'\s+', ' ', text)
     
     # Keep some punctuation that might be meaningful
-    text = re.sub(r'[^\w\s&\-]', ' ', text)
+    text = re.sub(r'[^\w\s&\-/]', ' ', text)  # Keep '/', '&', and '-' as they can be meaningful
     
-    return text.strip()
+    result = text.strip()
+    
+    # Append the size information back if it was found, making sure it's standardized
+    if size_value and size_value.lower() not in result:
+        result += f" {size_value}"
+    
+    return result
 
 def get_text_embedding(t: str) -> np.ndarray:
     return sentence_model.encode(t)
@@ -178,17 +195,27 @@ def heuristic_score(f: dict) -> float:
 
 def ml_match_score(f: dict) -> float:
     if xgb_clf is None:
-        # Adjust heuristic weights to give more importance to text similarity
-        text_weight = 0.6
-        weight_weight = 0.3
-        image_weight = 0.1
+        # Adjust heuristic weights for better balance
+        text_weight = 0.5  # Reduced from 0.6
+        weight_weight = 0.3 # Same as before
+        image_weight = 0.2  # Increased from 0.1
         
+        # Calculate weighted score
         score = (f["text_cos_sim"] * text_weight + 
                 f["weight_sim"] * weight_weight + 
                 f["image_sim"] * image_weight)
         
+        # Boost score when both text and weight are reasonable
+        if f["text_cos_sim"] > 70 and f["weight_sim"] > 70:
+            score += 5.0  # Boost score for items that match well on both text and weight
+            
+        # If strong match on one dimension and moderate on another, also boost
+        if (f["text_cos_sim"] > 85 and f["weight_sim"] > 50) or (f["text_cos_sim"] > 50 and f["weight_sim"] > 85):
+            score += 3.0
+        
         return score
     
+    # ML-based scoring if classifier is available
     v = np.array([f["text_cos_sim"], f["weight_sim"], f["image_sim"]], dtype=np.float32).reshape(1, -1)
     p = xgb_clf.predict_proba(v)[0][1]
     return float(p * 100.0)
@@ -199,7 +226,7 @@ def match_products(n1: str, n2: str, w1: Optional[str], w2: Optional[str],
                    u1: Optional[str], u2: Optional[str],
                    unit1: Optional['Unit'] = None, unit2: Optional['Unit'] = None,
                    e1: Optional[str] = None, e2: Optional[str] = None,
-                   t: float = 85.0) -> Tuple[bool, float]:  # Lowered threshold to 85%
+                   t: float = 75.0) -> Tuple[bool, float]:  # Lowered threshold to 75%
     # First check EAN codes if available
     if e1 and e2 and e1 == e2:
         return True, 100.0
@@ -315,10 +342,28 @@ def run_ai_matching(db_session):
 
                 # Try to find similar products
                 logger.debug(f"Searching for similar products to {psd.store_product_name}")
+                
+                # Use more advanced search techniques instead of simple LIKE
+                # 1. Try products with similar names using trigram similarity
                 similar_products = db_session.query(ProductStoreData).filter(
                     ProductStoreData.store_id != psd.store_id,
-                    ProductStoreData.store_product_name.ilike(f"%{psd.store_product_name}%")
-                ).all()
+                    func.similarity(ProductStoreData.store_product_name, psd.store_product_name) > 0.3
+                ).order_by(func.similarity(ProductStoreData.store_product_name, psd.store_product_name).desc()).limit(20).all()
+                
+                # 2. If no results from trigram search, fall back to simpler search
+                if not similar_products:
+                    # Split product name into words and search for products containing any of the significant words
+                    words = [w for w in psd.store_product_name.split() if len(w) > 3]  # Only use words longer than 3 chars
+                    if words:
+                        conditions = []
+                        for word in words[:3]:  # Use first 3 significant words
+                            conditions.append(ProductStoreData.store_product_name.ilike(f"%{word}%"))
+                        
+                        from sqlalchemy import or_
+                        similar_products = db_session.query(ProductStoreData).filter(
+                            ProductStoreData.store_id != psd.store_id,
+                            or_(*conditions)
+                        ).limit(20).all()
 
                 if similar_products:
                     logger.debug(f"Found {len(similar_products)} potential matches for {psd.store_product_name}")
@@ -339,7 +384,7 @@ def run_ai_matching(db_session):
                         best_match = candidate
                         best_score = score
 
-                if best_match and best_score >= 85.0:  # Threshold for matching
+                if best_match and best_score >= 75.0:  # Threshold for matching
                     logger.info(f"Found AI match for {psd.store_product_name} with score {best_score:.1f}%")
                     if best_match.product_id:
                         psd.product_id = best_match.product_id
