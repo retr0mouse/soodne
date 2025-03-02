@@ -584,6 +584,17 @@ def process_item(db: Session, store, item):
 
     if existing_psd:
         old_price = existing_psd.price
+        # If price has changed, save the old price to history
+        if float(old_price) != float(item['price']):
+            price_history = schemas.ProductPriceHistoryCreate(
+                product_store_id=existing_psd.product_store_id,
+                price=old_price
+            )
+            db.add(ProductPriceHistory(
+                product_store_id=existing_psd.product_store_id,
+                price=old_price
+            ))
+        
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
         existing_psd.matching_status = schemas.MatchingStatusEnum.unmatched
