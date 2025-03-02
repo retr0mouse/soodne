@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional, Dict
 from datetime import datetime
-from .enums import MatchingStatusEnum
 
 class ProductStoreDataBase(BaseModel):
     product_id: Optional[int] = None
@@ -14,7 +13,6 @@ class ProductStoreDataBase(BaseModel):
     store_unit_id: Optional[int] = None
     ean: Optional[str] = None
     additional_attributes: Optional[Dict] = None
-    matching_status: Optional[MatchingStatusEnum] = MatchingStatusEnum.unmatched
     last_matched: Optional[datetime] = None
 
 class ProductStoreDataCreate(ProductStoreDataBase):

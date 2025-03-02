@@ -580,8 +580,7 @@ def process_item(db: Session, store, item):
         store_product_name=item['name'],
         store_weight_value=weight_value,
         store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None,
-        matching_status=schemas.MatchingStatusEnum.unmatched
+        store_unit_id=unit.unit_id if unit else None
     )
 
     if existing_psd:
@@ -596,7 +595,6 @@ def process_item(db: Session, store, item):
         
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
-        existing_psd.matching_status = schemas.MatchingStatusEnum.unmatched
         db.commit()
         logger.debug(f"""
         Updated existing store data:

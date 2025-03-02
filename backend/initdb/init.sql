@@ -105,7 +105,6 @@ CREATE TABLE IF NOT EXISTS product_store_data (
     store_unit_id INTEGER,
     ean VARCHAR(13), 
     additional_attributes JSONB,
-    matching_status matching_status_enum DEFAULT 'unmatched',
     last_matched TIMESTAMP WITHOUT TIME ZONE,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
@@ -148,9 +147,6 @@ CREATE INDEX IF NOT EXISTS idx_productstoredata_additional_attributes
     ON product_store_data
     USING GIN (additional_attributes);
 
-CREATE INDEX IF NOT EXISTS idx_productstoredata_matching_status
-    ON product_store_data (matching_status);
-
 CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_name_trgm
     ON product_store_data
     USING GIN (store_product_name gin_trgm_ops);
@@ -182,7 +178,6 @@ BEGIN
         OR NEW.ean <> OLD.ean
         OR NEW.store_weight_value <> OLD.store_weight_value
         OR NEW.store_unit_id <> OLD.store_unit_id THEN
-        NEW.matching_status = 'unmatched';
         NEW.product_id = NULL;
         NEW.last_matched = NULL;
     END IF;
@@ -251,8 +246,8 @@ CREATE INDEX IF NOT EXISTS idx_product_matching_log_confidence_score
     ON product_matching_log (confidence_score);
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_unmatched
-    ON product_store_data (matching_status, product_id)
-    WHERE product_id IS NULL AND matching_status = 'unmatched';
+    ON product_store_data (product_id)
+    WHERE product_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_productstoredata_potential_matches
     ON product_store_data (store_id, product_id)

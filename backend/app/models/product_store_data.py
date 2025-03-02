@@ -1,10 +1,9 @@
 from sqlalchemy import (
-    Column, Integer, DECIMAL, ForeignKey, String, Text, TIMESTAMP, Enum, JSON
+    Column, Integer, DECIMAL, ForeignKey, String, Text, TIMESTAMP, JSON
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy import func
 from app.database.database import Base
-from .enums import MatchingStatusEnum
 
 class ProductStoreData(Base):
     __tablename__ = "product_store_data"
@@ -21,7 +20,6 @@ class ProductStoreData(Base):
     store_unit_id = Column(Integer, ForeignKey("units.unit_id"))
     ean = Column(String(13), nullable=True, index=True)
     additional_attributes = Column(JSON, nullable=True)
-    matching_status = Column(Enum(MatchingStatusEnum), default=MatchingStatusEnum.unmatched)
     last_matched = Column(TIMESTAMP(timezone=True), nullable=True)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())

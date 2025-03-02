@@ -25,8 +25,7 @@ def match_two_products(
     matched, confidence = match_products(psd1, psd2)
 
     if matched:
-        psd1.matching_status = schemas.MatchingStatusEnum.matched
-        psd2.matching_status = schemas.MatchingStatusEnum.matched
+        psd1.product_id = psd2.product_id
         db.commit()
 
         log = schemas.ProductMatchingLogCreate(
@@ -38,14 +37,14 @@ def match_two_products(
         matching_log = product_matching_log_service.create(db, log=log)
         return matching_log
     else:
-        return schemas.ProductMatchingLog(
-            log_id=0,
+        log = schemas.ProductMatchingLogCreate(
             product_store_id=product_store_id1,
             product_id=None,
-            confidence_score=confidence,
-            matched_at=None,
-            matched_by="api_matcher"
+            confidence_score=confidence if confidence > 0 else None,
+            matched_by="api_matcher_no_match"
         )
+        matching_log = product_matching_log_service.create(db, log=log)
+        return matching_log
 
 @router.get("/run-parsing")
 async def run_parsing():
