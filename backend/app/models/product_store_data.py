@@ -10,7 +10,7 @@ class ProductStoreData(Base):
     __tablename__ = "product_store_data"
 
     product_store_id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.product_id", ondelete="CASCADE"), nullable=True)
     store_id = Column(Integer, ForeignKey("stores.store_id", ondelete="CASCADE"), nullable=False)
     price = Column(DECIMAL(10, 2), nullable=False)
     price_per_unit = Column(DECIMAL(10, 2), nullable=True)
@@ -19,6 +19,7 @@ class ProductStoreData(Base):
     store_image_url = Column(Text, nullable=True)
     store_weight_value = Column(DECIMAL(10, 2), nullable=True)
     store_unit_id = Column(Integer, ForeignKey("units.unit_id"))
+    ean = Column(String(13), nullable=True, index=True)
     additional_attributes = Column(JSON, nullable=True)
     matching_status = Column(Enum(MatchingStatusEnum), default=MatchingStatusEnum.unmatched)
     last_matched = Column(TIMESTAMP(timezone=True), nullable=True)

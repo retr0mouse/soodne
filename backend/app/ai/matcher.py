@@ -1,238 +1,286 @@
 import logging
-from typing import Tuple
+import re
+import requests
 import numpy as np
 import torch
-from PIL import Image
-from sentence_transformers import SentenceTransformer
-from torchvision import models as torchvision_models
-from torchvision.models import ResNet18_Weights
-from torchvision import transforms
-from rapidfuzz import fuzz
-import requests
+import xgboost as xgb
+import faiss
 from io import BytesIO
-import re
+from PIL import Image
+from sentence_transformers import SentenceTransformer, util
+from torchvision import models, transforms
 from sqlalchemy import func
+from typing import Optional, List, Tuple
 
-from app import models, schemas
-from app.database.database import SessionLocal
-from app.services import product_matching_log_service, product_service
+from app.models.product_store_data import ProductStoreData
+from app.models.product_matching_log import ProductMatchingLog
+from app.models.unit import Unit
+from app.models.enums import MatchingStatusEnum
 
+# Logging setup
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-image_model = torchvision_models.resnet18(weights=ResNet18_Weights.DEFAULT)
+# ------------------ TEXT & IMAGE MODELS ------------------
+
+sentence_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+image_model = models.resnet50(weights="IMAGENET1K_V2")
 image_model.eval()
 
-preprocess = transforms.Compose([
+image_preprocess = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-def preprocess_name(name: str) -> str:
-    name = re.sub(r'[^\w\s]', '', name)
-    name = name.lower()
-    return name
+xgb_clf: Optional[xgb.XGBClassifier] = None
 
-def get_image_embedding(url: str) -> np.ndarray:
+# ------------------ LOAD ML CLASSIFIER ------------------
+
+def load_xgb_model(path: str) -> None:
+    global xgb_clf
+    m = xgb.XGBClassifier()
+    m.load_model(path)
+    xgb_clf = m
+
+# ------------------ TEXT & IMAGE PROCESSING ------------------
+
+def preprocess_text(t: str) -> str:
+    return re.sub(r"[^\w\s]", "", t.lower().strip())
+
+def get_text_embedding(t: str) -> np.ndarray:
+    return sentence_model.encode(t)
+
+def get_image_embedding_from_url(url: str) -> np.ndarray:
     try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content)).convert('RGB')
-        image = preprocess(image)
-        image = image.unsqueeze(0)
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        i = Image.open(BytesIO(r.content)).convert("RGB")
+        t = image_preprocess(i).unsqueeze(0)
         with torch.no_grad():
-            embedding = image_model(image).numpy().flatten()
-        return embedding
-    except Exception as e:
-        logger.error(f"Error processing image from URL {url}: {e}")
-        return np.zeros(512)
+            f = image_model(t).numpy().flatten()
+        return f
+    except:
+        return np.zeros(1000, dtype=np.float32)
 
-def compare_weight(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> float:
-    if not psd1.store_weight_value or not psd2.store_weight_value:
-        return 0
+# ------------------ ATTRIBUTE COMPARISON ------------------
+
+def compare_weight(a: Optional[str], b: Optional[str], 
+                  unit_a: Optional['Unit'] = None, 
+                  unit_b: Optional['Unit'] = None) -> float:
+    if not a or not b:
+        return 0.0
+    
+    def parse(x: str) -> Optional[float]:
+        # Remove all non-numeric characters except dots and commas
+        c = re.sub(r'[^\d\.,]', '', x)
+        # Replace comma with dot for proper float parsing
+        c = c.replace(',', '.')
+        try:
+            return float(c)
+        except:
+            return None
+            
+    x = parse(a)
+    y = parse(b)
+    
+    if x is None or y is None:
+        return 0.0
+        
+    # Convert both values to base unit using conversion factors
+    if unit_a and unit_b:
+        try:
+            x = x * float(unit_a.conversion_factor)
+            y = y * float(unit_b.conversion_factor)
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.error(f"Error converting units: {e}")
+            return 0.0
+    
+    # Compare with tolerance
     try:
-        weight1 = float(psd1.store_weight_value)
-        weight2 = float(psd2.store_weight_value)
-        tolerance = 0.05
-        return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
+        if x == 0 and y == 0:
+            return 100.0
+        if x == 0 or y == 0:
+            return 0.0
+        if abs(x - y)/max(x, y) <= 0.05:
+            return 100.0
+    except ZeroDivisionError:
+        logger.error("Zero division error in weight comparison")
+        return 0.0
+        
+    return 0.0
+
+# ------------------ FEATURE EXTRACTION ------------------
+
+def compute_features(n1: str, n2: str, w1: Optional[str], w2: Optional[str], 
+                     u1: Optional['Unit'] = None, u2: Optional['Unit'] = None,
+                     i1: Optional[np.ndarray] = None, i2: Optional[np.ndarray] = None) -> dict:
+    try:
+        e1 = get_text_embedding(preprocess_text(n1))
+        e2 = get_text_embedding(preprocess_text(n2))
+        v = float(util.cos_sim(e1, e2)[0][0] * 100.0)
     except Exception as e:
-        logger.error(f"Error comparing weights: {e}")
-        return 0
+        logger.error(f"Error computing text similarity: {e}")
+        v = 0.0
+        
+    ws = compare_weight(w1, w2, u1, u2)
+    
+    iscore = 0.0
+    if i1 is not None and i2 is not None:
+        try:
+            n1_ = np.linalg.norm(i1)
+            n2_ = np.linalg.norm(i2)
+            if n1_ > 1e-8 and n2_ > 1e-8:
+                iscore = float(np.dot(i1, i2) / (n1_ * n2_) * 100.0)
+        except Exception as e:
+            logger.error(f"Error computing image similarity: {e}")
+            
+    return {"text_cos_sim": v, "weight_sim": ws, "image_sim": iscore}
 
-def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> Tuple[bool, float]:
-    # If EAN codes are available and match, it's a definite match
-    if psd1.ean and psd2.ean and psd1.ean == psd2.ean:
+def heuristic_score(f: dict) -> float:
+    return f["text_cos_sim"] * 0.5 + f["weight_sim"] * 0.25 + f["image_sim"] * 0.25
+
+def ml_match_score(f: dict) -> float:
+    if xgb_clf is None:
+        return heuristic_score(f)
+    v = np.array([f["text_cos_sim"], f["weight_sim"], f["image_sim"]], dtype=np.float32).reshape(1, -1)
+    p = xgb_clf.predict_proba(v)[0][1]
+    return float(p * 100.0)
+
+# ------------------ MATCHING FUNCTION ------------------
+
+def match_products(n1: str, n2: str, w1: Optional[str], w2: Optional[str], 
+                   u1: Optional[str], u2: Optional[str],
+                   unit1: Optional['Unit'] = None, unit2: Optional['Unit'] = None,
+                   e1: Optional[str] = None, e2: Optional[str] = None,
+                   t: float = 90.0) -> Tuple[bool, float]:
+    # First check EAN codes if available
+    if e1 and e2 and e1 == e2:
         return True, 100.0
+        
+    i1 = get_image_embedding_from_url(u1) if u1 else None
+    i2 = get_image_embedding_from_url(u2) if u2 else None
+    f = compute_features(n1, n2, w1, w2, unit1, unit2, i1, i2)
+    s = ml_match_score(f)
+    return (s >= t, round(s, 2))
 
-    # Compare units and weights if available
-    weight_match = compare_weight(psd1, psd2)
-    if psd1.store_unit_id and psd2.store_unit_id and psd1.store_unit_id != psd2.store_unit_id:
-        return False, 0.0
+# ------------------ FAISS INDEX FOR FAST RETRIEVAL ------------------
 
-    # Get base product names by removing common descriptors
-    name1 = psd1.store_product_name.lower()
-    name2 = psd2.store_product_name.lower()
-    
-    # Use ML model to get semantic embeddings
-    emb1 = sentence_model.encode(name1)
-    emb2 = sentence_model.encode(name2)
-    semantic_sim = float(np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))) * 100
+class FaissIndexWrapper:
+    def __init__(self, dim: int):
+        self.index = faiss.IndexFlatL2(dim)
+        self.embs = None
+        self.ids = []
 
-    # If semantic similarity is too low, they're different products
-    if semantic_sim < 50:  # Products are semantically very different
-        return False, 0.0
+    def build(self, txts: List[str], ids: List[int]):
+        self.ids = ids
+        e = []
+        for x in txts:
+            a = get_text_embedding(preprocess_text(x)).astype(np.float32)
+            e.append(a)
+        self.embs = np.vstack(e)
+        self.index.add(self.embs)
 
-    # Calculate trigram similarity using database
-    with SessionLocal() as db:
-        trigram_sim = db.execute(
-            """
-            SELECT similarity(LOWER(:name1), LOWER(:name2)) * 100 as sim
-            """,
-            {"name1": name1, "name2": name2}
-        ).scalar()
+    def search(self, q: str, k: int = 5):
+        v = get_text_embedding(preprocess_text(q)).astype(np.float32).reshape(1, -1)
+        d, i = self.index.search(v, k)
+        r = []
+        for dist, idx in zip(d[0], i[0]):
+            pid = self.ids[idx]
+            r.append((pid, float(dist)))
+        return r
 
-    # Get token sort ratio for more precise comparison
-    token_sim = fuzz.token_sort_ratio(name1, name2)
-    
-    # Extract main product type (last word before unit)
-    def get_product_type(name: str) -> str:
-        # Remove unit if present
-        name = re.sub(r'\s*,\s*kg$|\s*kg$', '', name)
-        # Get last word before any descriptors
-        words = name.split()
-        if len(words) > 0:
-            return words[-1]
-        return name
+# ------------------ FULL PIPELINE ------------------
 
-    prod_type1 = get_product_type(name1)
-    prod_type2 = get_product_type(name2)
+def run_ai_matching(db_session):
+    unmatched_psds = db_session.query(ProductStoreData).filter(
+        ProductStoreData.product_id.is_(None),
+        ProductStoreData.matching_status == MatchingStatusEnum.unmatched
+    ).all()
 
-    # If main product types are different, they're different products
-    if prod_type1 != prod_type2:
-        type_sim = fuzz.ratio(prod_type1, prod_type2)
-        if type_sim < 80:  # Allow some fuzzy matching for typos
-            return False, 0.0
+    known_psds = db_session.query(ProductStoreData).filter(
+        ProductStoreData.product_id.isnot(None)
+    ).all()
 
-    # Calculate final similarity score with weighted components
-    name_similarity = (
-        semantic_sim * 0.4 +
-        trigram_sim * 0.3 +     
-        token_sim * 0.3           
-    )
+    known_texts = [psd.store_product_name for psd in known_psds]
+    known_ids = [psd.product_store_id for psd in known_psds]
 
-    # Final score combining name and weight matching
-    total_score = (name_similarity * 0.8) + (weight_match * 0.2)
+    d = len(get_text_embedding("test"))
+    faiss_wrapper = FaissIndexWrapper(dim=d)
+    faiss_wrapper.build(known_texts, known_ids)
 
-    # Require very high confidence for matching
-    matched = total_score > 95
-
-    return matched, round(total_score, 2)
-
-def run_ai_matching():
-    with SessionLocal() as db:
-        # Get all unmatched product store data entries
-        unmatched_psds = db.query(models.ProductStoreData).filter(
-            models.ProductStoreData.product_id.is_(None),
-            models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
-        ).all()
-
-        for psd in unmatched_psds:
-            # First try to find exact EAN matches
-            if psd.ean:
-                exact_match = db.query(models.ProductStoreData).filter(
-                    models.ProductStoreData.store_id != psd.store_id,
-                    models.ProductStoreData.product_id.isnot(None),
-                    models.ProductStoreData.ean == psd.ean
-                ).first()
+    for psd in unmatched_psds:
+        if psd.ean:
+            exact_match = db_session.query(ProductStoreData).filter(
+                ProductStoreData.store_id != psd.store_id,
+                ProductStoreData.product_id.isnot(None),
+                ProductStoreData.ean == psd.ean
+            ).first()
+            if exact_match:
+                psd.product_id = exact_match.product_id
+                psd.matching_status = MatchingStatusEnum.matched
+                psd.last_matched = func.now()
                 
-                if exact_match:
-                    psd.product_id = exact_match.product_id
-                    psd.matching_status = schemas.MatchingStatusEnum.matched
-                    psd.last_matched = func.now()
-                    
-                    log = schemas.ProductMatchingLogCreate(
-                        product_store_id=psd.product_store_id,
-                        product_id=exact_match.product_id,
-                        confidence_score=100.0,
-                        matched_by="ean_matcher"
-                    )
-                    product_matching_log_service.create(db, log=log)
-                    db.commit()
-                    continue
-
-            # Find potential matches using both trigram and semantic similarity
-            store_name = psd.store_product_name.lower()
-            
-            # Get base product type
-            product_type = store_name.split()[-1].strip(',.') if store_name else ''
-            
-            # Find potential matches with similar names
-            potential_matches = db.execute(
-                """
-                SELECT psd.* 
-                FROM product_store_data psd
-                WHERE psd.store_id != :store_id
-                AND psd.product_id IS NOT NULL
-                AND (
-                    similarity(LOWER(psd.store_product_name), LOWER(:name)) > 0.3
-                    OR LOWER(psd.store_product_name) LIKE '%' || :product_type || '%'
-                )
-                ORDER BY similarity(LOWER(psd.store_product_name), LOWER(:name)) DESC
-                LIMIT 5
-                """,
-                {
-                    "store_id": psd.store_id,
-                    "name": store_name,
-                    "product_type": product_type
-                }
-            ).fetchall()
-
-            best_match = None
-            best_confidence = 0
-
-            for potential_match in potential_matches:
-                matched, confidence = match_products(psd, potential_match)
-                if matched and confidence > best_confidence:
-                    best_match = potential_match
-                    best_confidence = confidence
-
-            if best_match:
-                psd.product_id = best_match.product_id
-                psd.matching_status = schemas.MatchingStatusEnum.matched
-                psd.last_matched = func.now()
-
-                log = schemas.ProductMatchingLogCreate(
+                # Log the EAN match
+                match_log = ProductMatchingLog(
                     product_store_id=psd.product_store_id,
-                    product_id=best_match.product_id,
-                    confidence_score=best_confidence,
-                    matched_by="hybrid_matcher"
-                )
-                product_matching_log_service.create(db, log=log)
-            else:
-                # No match found - create new product
-                new_product = schemas.ProductCreate(
-                    name=psd.store_product_name,
-                    image_url=psd.store_image_url,
-                    weight_value=psd.store_weight_value,
-                    unit_id=psd.store_unit_id
-                )
-                created_product = product_service.create(db, product=new_product)
-
-                psd.product_id = created_product.product_id
-                psd.matching_status = schemas.MatchingStatusEnum.matched
-                psd.last_matched = func.now()
-
-                log = schemas.ProductMatchingLogCreate(
-                    product_store_id=psd.product_store_id,
-                    product_id=created_product.product_id,
+                    product_id=exact_match.product_id,
                     confidence_score=100.0,
-                    matched_by="new_product_creation"
+                    matched_by="ean_matcher"
                 )
-                product_matching_log_service.create(db, log=log)
+                db_session.add(match_log)
+                db_session.commit()
+                continue
 
-            db.commit()
+        candidates = faiss_wrapper.search(psd.store_product_name, k=5)
+
+        best_match_obj = None
+        best_score = 0.0
+
+        for cand_id, dist in candidates:
+            cand_psd = db_session.query(ProductStoreData).filter(
+                ProductStoreData.product_store_id == cand_id
+            ).one_or_none()
+
+            if cand_psd:
+                matched, score = match_products(
+                    psd.store_product_name, cand_psd.store_product_name,
+                    psd.store_weight_value, cand_psd.store_weight_value,
+                    psd.store_image_url, cand_psd.store_image_url,
+                    psd.store_unit, cand_psd.store_unit,
+                    psd.ean, cand_psd.ean
+                )
+                if matched and score > best_score:
+                    best_match_obj = cand_psd
+                    best_score = score
+
+        # Update product if match found
+        if best_match_obj:
+            psd.product_id = best_match_obj.product_id
+            psd.matching_status = MatchingStatusEnum.matched
+            psd.last_matched = func.now()
+            
+            # Log the match
+            match_log = ProductMatchingLog(
+                product_store_id=psd.product_store_id,
+                product_id=best_match_obj.product_id,
+                confidence_score=best_score,
+                matched_by="ai_matcher"
+            )
+            db_session.add(match_log)
+        else:
+            # No match found - mark as unmatched
+            psd.matching_status = MatchingStatusEnum.unmatched
+            
+            # Log the failed match attempt
+            match_log = ProductMatchingLog(
+                product_store_id=psd.product_store_id,
+                product_id=None,
+                confidence_score=0.0,
+                matched_by="ai_matcher_no_match"
+            )
+            db_session.add(match_log)
+            
+        db_session.commit()

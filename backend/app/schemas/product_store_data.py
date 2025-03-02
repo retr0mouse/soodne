@@ -12,6 +12,7 @@ class ProductStoreDataBase(BaseModel):
     store_weight_value: Optional[float] = None
     store_image_url: Optional[str] = None
     store_unit_id: Optional[int] = None
+    ean: Optional[str] = None
     additional_attributes: Optional[Dict] = None
     matching_status: Optional[MatchingStatusEnum] = MatchingStatusEnum.unmatched
     last_matched: Optional[datetime] = None
