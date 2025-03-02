@@ -7,8 +7,10 @@ from app.services import (
     store_service,
     unit_service,
     product_service,
-    product_store_data_service
+    product_store_data_service,
+    product_price_history_service
 )
+from app.models.product_price_history import ProductPriceHistory
 import random
 import time
 import json
@@ -590,10 +592,7 @@ def process_item(db: Session, store, item):
                 product_store_id=existing_psd.product_store_id,
                 price=old_price
             )
-            db.add(ProductPriceHistory(
-                product_store_id=existing_psd.product_store_id,
-                price=old_price
-            ))
+            product_price_history_service.create(db, price_history)
         
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
