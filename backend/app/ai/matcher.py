@@ -14,12 +14,13 @@ from typing import Optional, List, Tuple
 
 from app.models.product_store_data import ProductStoreData
 from app.models.product_matching_log import ProductMatchingLog
+from app.models.product import Product
 from app.models.unit import Unit
 from app.models.enums import MatchingStatusEnum
+from app.core.logger import setup_logger
 
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Replace the existing logger setup
+logger = setup_logger("app.ai.matcher")
 
 # ------------------ TEXT & IMAGE MODELS ------------------
 
@@ -73,6 +74,10 @@ def compare_weight(a: Optional[str], b: Optional[str],
     if not a or not b:
         return 0.0
     
+    # Convert inputs to strings if they aren't already
+    a_str = str(a) if a is not None else ""
+    b_str = str(b) if b is not None else ""
+    
     def parse(x: str) -> Optional[float]:
         # Remove all non-numeric characters except dots and commas
         c = re.sub(r'[^\d\.,]', '', x)
@@ -83,8 +88,8 @@ def compare_weight(a: Optional[str], b: Optional[str],
         except:
             return None
             
-    x = parse(a)
-    y = parse(b)
+    x = parse(a_str)
+    y = parse(b_str)
     
     if x is None or y is None:
         return 0.0
@@ -195,92 +200,185 @@ class FaissIndexWrapper:
 # ------------------ FULL PIPELINE ------------------
 
 def run_ai_matching(db_session):
-    unmatched_psds = db_session.query(ProductStoreData).filter(
-        ProductStoreData.product_id.is_(None),
-        ProductStoreData.matching_status == MatchingStatusEnum.unmatched
-    ).all()
+    try:
+        # Get all unmatched products in a fresh query
+        unmatched_psds = db_session.query(ProductStoreData).filter(
+            ProductStoreData.product_id.is_(None),
+            ProductStoreData.matching_status == MatchingStatusEnum.unmatched
+        ).all()
 
-    known_psds = db_session.query(ProductStoreData).filter(
-        ProductStoreData.product_id.isnot(None)
-    ).all()
+        total_products = len(unmatched_psds)
+        if not unmatched_psds:
+            logger.info("No unmatched products found to process")
+            return {
+                "processed": 0,
+                "matched": 0,
+                "created": 0
+            }
 
-    known_texts = [psd.store_product_name for psd in known_psds]
-    known_ids = [psd.product_store_id for psd in known_psds]
-
-    d = len(get_text_embedding("test"))
-    faiss_wrapper = FaissIndexWrapper(dim=d)
-    faiss_wrapper.build(known_texts, known_ids)
-
-    for psd in unmatched_psds:
-        if psd.ean:
-            exact_match = db_session.query(ProductStoreData).filter(
-                ProductStoreData.store_id != psd.store_id,
-                ProductStoreData.product_id.isnot(None),
-                ProductStoreData.ean == psd.ean
-            ).first()
-            if exact_match:
-                psd.product_id = exact_match.product_id
-                psd.matching_status = MatchingStatusEnum.matched
-                psd.last_matched = func.now()
+        logger.info(f"Starting matching process for {total_products} unmatched products")
+        
+        matched_count = 0
+        created_count = 0
+        processed_count = 0
+        
+        for psd in unmatched_psds:
+            try:
+                processed_count += 1
+                if processed_count % 100 == 0:  # Log progress every 100 items
+                    logger.info(f"Progress: {processed_count}/{total_products} ({(processed_count/total_products)*100:.1f}%)")
                 
-                # Log the EAN match
-                match_log = ProductMatchingLog(
-                    product_store_id=psd.product_store_id,
-                    product_id=exact_match.product_id,
-                    confidence_score=100.0,
-                    matched_by="ean_matcher"
-                )
-                db_session.add(match_log)
+                # Refresh the object to ensure it's bound to the session
+                db_session.refresh(psd)
+                
+                logger.debug(f"Processing product: {psd.store_product_name} (ID: {psd.product_store_id})")
+                
+                # First try to find by EAN
+                if psd.ean:
+                    logger.debug(f"Trying EAN match for {psd.ean}")
+                    exact_match = db_session.query(ProductStoreData).filter(
+                        ProductStoreData.store_id != psd.store_id,
+                        ProductStoreData.ean == psd.ean
+                    ).first()
+                    
+                    if exact_match:
+                        db_session.refresh(exact_match)
+                        if exact_match.product_id:
+                            logger.info(f"Found exact EAN match for {psd.store_product_name} with existing product")
+                            psd.product_id = exact_match.product_id
+                        else:
+                            logger.info(f"Creating new product from EAN match for {psd.store_product_name}")
+                            new_product = Product(
+                                name=psd.store_product_name,
+                                weight_value=psd.store_weight_value,
+                                unit_id=psd.store_unit_id,
+                                image_url=psd.store_image_url,
+                                barcode=psd.ean
+                            )
+                            db_session.add(new_product)
+                            db_session.flush()
+                            
+                            psd.product_id = new_product.product_id
+                            exact_match.product_id = new_product.product_id
+                            exact_match.matching_status = MatchingStatusEnum.matched
+                            created_count += 1
+                        
+                        psd.matching_status = MatchingStatusEnum.matched
+                        psd.last_matched = func.now()
+                        
+                        match_log = ProductMatchingLog(
+                            product_store_id=psd.product_store_id,
+                            product_id=psd.product_id,
+                            confidence_score=100.0,
+                            matched_by="ean_matcher"
+                        )
+                        db_session.add(match_log)
+                        matched_count += 1
+                        db_session.commit()
+                        continue
+
+                # Try to find similar products
+                logger.debug(f"Searching for similar products to {psd.store_product_name}")
+                similar_products = db_session.query(ProductStoreData).filter(
+                    ProductStoreData.store_id != psd.store_id,
+                    ProductStoreData.store_product_name.ilike(f"%{psd.store_product_name}%")
+                ).all()
+
+                if similar_products:
+                    logger.debug(f"Found {len(similar_products)} potential matches for {psd.store_product_name}")
+
+                best_match = None
+                best_score = 0.0
+
+                for candidate in similar_products:
+                    db_session.refresh(candidate)
+                    matched, score = match_products(
+                        psd.store_product_name, candidate.store_product_name,
+                        psd.store_weight_value, candidate.store_weight_value,
+                        psd.store_image_url, candidate.store_image_url,
+                        psd.store_unit, candidate.store_unit,
+                        psd.ean, candidate.ean
+                    )
+                    if matched and score > best_score:
+                        best_match = candidate
+                        best_score = score
+
+                if best_match and best_score >= 90.0:  # Threshold for matching
+                    logger.info(f"Found AI match for {psd.store_product_name} with score {best_score:.1f}%")
+                    if best_match.product_id:
+                        psd.product_id = best_match.product_id
+                    else:
+                        logger.info(f"Creating new product from AI match for {psd.store_product_name}")
+                        new_product = Product(
+                            name=psd.store_product_name,
+                            weight_value=psd.store_weight_value,
+                            unit_id=psd.store_unit_id,
+                            image_url=psd.store_image_url,
+                            barcode=psd.ean
+                        )
+                        db_session.add(new_product)
+                        db_session.flush()
+                        
+                        psd.product_id = new_product.product_id
+                        best_match.product_id = new_product.product_id
+                        best_match.matching_status = MatchingStatusEnum.matched
+                        created_count += 1
+                    
+                    psd.matching_status = MatchingStatusEnum.matched
+                    psd.last_matched = func.now()
+                    
+                    match_log = ProductMatchingLog(
+                        product_store_id=psd.product_store_id,
+                        product_id=psd.product_id,
+                        confidence_score=best_score,
+                        matched_by="ai_matcher"
+                    )
+                    db_session.add(match_log)
+                    matched_count += 1
+                else:
+                    logger.info(f"No match found for {psd.store_product_name}, creating new product")
+                    new_product = Product(
+                        name=psd.store_product_name,
+                        weight_value=psd.store_weight_value,
+                        unit_id=psd.store_unit_id,
+                        image_url=psd.store_image_url,
+                        barcode=psd.ean
+                    )
+                    db_session.add(new_product)
+                    db_session.flush()
+                    
+                    psd.product_id = new_product.product_id
+                    psd.matching_status = MatchingStatusEnum.matched
+                    psd.last_matched = func.now()
+                    created_count += 1
+                    
+                    match_log = ProductMatchingLog(
+                        product_store_id=psd.product_store_id,
+                        product_id=psd.product_id,
+                        confidence_score=0.0,
+                        matched_by="new_product_created"
+                    )
+                    db_session.add(match_log)
+                
                 db_session.commit()
+                
+            except Exception as e:
+                logger.error(f"Error processing product {psd.store_product_name}: {str(e)}", exc_info=True)
+                db_session.rollback()
                 continue
 
-        candidates = faiss_wrapper.search(psd.store_product_name, k=5)
-
-        best_match_obj = None
-        best_score = 0.0
-
-        for cand_id, dist in candidates:
-            cand_psd = db_session.query(ProductStoreData).filter(
-                ProductStoreData.product_store_id == cand_id
-            ).one_or_none()
-
-            if cand_psd:
-                matched, score = match_products(
-                    psd.store_product_name, cand_psd.store_product_name,
-                    psd.store_weight_value, cand_psd.store_weight_value,
-                    psd.store_image_url, cand_psd.store_image_url,
-                    psd.store_unit, cand_psd.store_unit,
-                    psd.ean, cand_psd.ean
-                )
-                if matched and score > best_score:
-                    best_match_obj = cand_psd
-                    best_score = score
-
-        # Update product if match found
-        if best_match_obj:
-            psd.product_id = best_match_obj.product_id
-            psd.matching_status = MatchingStatusEnum.matched
-            psd.last_matched = func.now()
-            
-            # Log the match
-            match_log = ProductMatchingLog(
-                product_store_id=psd.product_store_id,
-                product_id=best_match_obj.product_id,
-                confidence_score=best_score,
-                matched_by="ai_matcher"
-            )
-            db_session.add(match_log)
-        else:
-            # No match found - mark as unmatched
-            psd.matching_status = MatchingStatusEnum.unmatched
-            
-            # Log the failed match attempt
-            match_log = ProductMatchingLog(
-                product_store_id=psd.product_store_id,
-                product_id=None,
-                confidence_score=0.0,
-                matched_by="ai_matcher_no_match"
-            )
-            db_session.add(match_log)
-            
-        db_session.commit()
+        logger.info(f"""Matching completed:
+        - Processed: {processed_count} products
+        - Matched: {matched_count} products
+        - Created new: {created_count} products
+        - Success rate: {((matched_count + created_count) / processed_count * 100):.1f}%""")
+        
+        return {
+            "processed": processed_count,
+            "matched": matched_count,
+            "created": created_count
+        }
+    except Exception as e:
+        logger.error(f"Error during matching process: {str(e)}", exc_info=True)
+        db_session.rollback()
+        raise
