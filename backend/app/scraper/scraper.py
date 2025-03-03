@@ -349,36 +349,46 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
         return
     
     total_products_processed = 0
+    successful_categories = 0
+    failed_categories = 0
+    
+    # Shuffle categories to avoid getting stuck on problematic ones
+    import random
+    random.shuffle(categories)
+    logger.info("Categories shuffled to randomize processing order")
     
     for category_index, category in enumerate(categories, 1):
         try:
             logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
             if not category['link']:
                 logger.warning(f"Skipping category {category['title']} - no link available")
+                failed_categories += 1
                 continue
             
             # Process each category with retry logic
             category_retry_count = 0
             category_items = []
             
-            while category_retry_count < 2 and not category_items:  # Try up to 2 times per category
+            while category_retry_count < 3 and not category_items:  # Try up to 3 times per category
                 try:
                     category_items = get_rimi_items_by_category(category, headers, user_agent)
-                    if not category_items and category_retry_count < 1:
-                        logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/2)")
+                    if not category_items and category_retry_count < 2:
+                        logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/3)")
                         category_retry_count += 1
                         time.sleep(random_delay(5, 10))
                 except Exception as e:
-                    logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/2): {str(e)}")
+                    logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/3): {str(e)}")
                     category_retry_count += 1
-                    if category_retry_count < 2:
+                    if category_retry_count < 3:
                         time.sleep(random_delay(5, 10))
             
             if not category_items:
                 logger.error(f"Failed to retrieve items for category {category['title']} after retries")
+                failed_categories += 1
                 continue
                 
             logger.info(f"Found {len(category_items)} items in category {category['title']}")
+            successful_categories += 1
             
             # Process items in batches to avoid long transactions
             batch_size = 50
@@ -386,14 +396,18 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
                 batch = category_items[i:i + batch_size]
                 logger.info(f"Processing batch {i//batch_size + 1}/{(len(category_items) + batch_size - 1)//batch_size} of items in category {category['title']}")
                 
+                batch_success_count = 0
                 for item_index, item in enumerate(batch, 1):
                     try:
                         logger.info(f"Processing item {item_index}/{len(batch)}: {item['name']}")
                         process_item(db, store, item)
                         total_products_processed += 1
+                        batch_success_count += 1
                     except Exception as e:
                         logger.error(f"Error processing item {item['name']}: {str(e)}")
                         continue
+                
+                logger.info(f"Successfully processed {batch_success_count}/{len(batch)} items in this batch")
                 
                 # Commit the database changes after each batch
                 try:
@@ -408,9 +422,14 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
                 
         except Exception as e:
             logger.error(f"Unhandled error processing category {category['title']}: {str(e)}")
+            failed_categories += 1
             continue
+        
+        # After each category, log progress
+        logger.info(f"Progress: {category_index}/{len(categories)} categories processed. Success: {successful_categories}, Failed: {failed_categories}")
     
     logger.info(f"Rimi scraping completed. Total products processed: {total_products_processed}")
+    logger.info(f"Categories summary - Total: {len(categories)}, Successful: {successful_categories}, Failed: {failed_categories}")
 
 @retry(
     stop=stop_after_attempt(3),
@@ -438,76 +457,65 @@ def get_rimi_categories(headers, user_agent):
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         logger.debug("Chrome driver initialized successfully")
         
-        url = 'https://www.rimi.ee/epood/ee'
-        logger.debug(f"Navigating to URL: {url}")
-        driver.get(url)
-        
-        # First wait for page to basically load
-        time.sleep(10)
-        
-        # More reliable wait - wait for page to be fully loaded
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        
-        # Try to handle cookie dialog if it appears
-        try:
-            cookie_dialog = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
-            )
-            if cookie_dialog:
-                driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
-                logger.debug("Removed cookie dialog")
-        except Exception as e:
-            logger.debug(f"Cookie dialog handling: {str(e)}")
-        
-        # Now wait for category menu with increased timeout
-        for attempt in range(3):  # Try up to 3 times
-            try:
-                logger.debug(f"Waiting for category menu (attempt {attempt+1}/3)")
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".category-menu button.trigger"))
-                )
-                break
-            except Exception as e:
-                logger.warning(f"Failed to find category menu (attempt {attempt+1}/3): {str(e)}")
-                if attempt < 2:  # Don't sleep on the last attempt
-                    time.sleep(5)  # Additional delay between attempts
-                    # Try refreshing the page
-                    driver.refresh()
-                    time.sleep(5)
-                else:
-                    # On final attempt, try to get page HTML for debugging
-                    page_source = driver.page_source
-                    logger.error(f"Category menu not found after 3 attempts. Page source length: {len(page_source)}")
-                    # Try alternative selectors as a fallback
-                    try:
-                        elements = driver.find_elements(By.CSS_SELECTOR, ".category-navigation a")
-                        if elements:
-                            logger.debug(f"Found {len(elements)} alternative category elements")
-                    except:
-                        pass
-        
-        # Try multiple selectors to find categories
-        selectors = [
-            ".category-menu button.trigger",
-            ".category-navigation a[href*='/c/']",
-            "a[href*='/c/']"
+        # Try multiple URLs to get categories
+        urls_to_try = [
+            'https://www.rimi.ee/epood/ee',
+            'https://www.rimi.ee/epood/ee/categories',
+            'https://www.rimi.ee/epood/ee/products'
         ]
         
-        category_elements = []
-        for selector in selectors:
+        for url_index, url in enumerate(urls_to_try):
+            logger.debug(f"Trying URL {url_index + 1}/{len(urls_to_try)}: {url}")
+            driver.get(url)
+            
+            # First wait for page to basically load
+            time.sleep(10)
+            
+            # More reliable wait - wait for page to be fully loaded
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Try to handle cookie dialog if it appears
             try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
-                    category_elements = elements
-                    break
+                cookie_dialog = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
+                )
+                if cookie_dialog:
+                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
+                    logger.debug("Removed cookie dialog")
             except Exception as e:
-                logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
+                logger.debug(f"Cookie dialog handling: {str(e)}")
+            
+            # Try multiple selectors to find categories
+            selectors = [
+                ".category-menu button.trigger",
+                ".category-navigation a[href*='/c/']",
+                "a[href*='/c/']",
+                ".category-menu__item a",
+                ".category-list a",
+                "nav a[href*='/c/']",
+                ".main-navigation a[href*='/c/']"
+            ]
+            
+            category_elements = []
+            for selector in selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements and len(elements) > 0:
+                        logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
+                        category_elements = elements
+                        break
+                except Exception as e:
+                    logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
+            
+            if category_elements:
+                logger.debug(f"Found {len(category_elements)} category elements")
+                break
+            
+            logger.warning(f"No category elements found with URL {url}, trying next URL if available")
         
-        logger.debug(f"Found {len(category_elements)} category elements")
-        
+        # Process found category elements
         for element in category_elements:
             try:
                 href = element.get_attribute('href')
@@ -517,7 +525,7 @@ def get_rimi_categories(headers, user_agent):
                 except:
                     name = element.text.strip()
                 
-                if href and name:
+                if href and name and '/c/' in href:
                     category_id = href.split('/c/')[-1] if '/c/' in href else None
                     
                     if category_id:
@@ -556,6 +564,34 @@ def get_rimi_categories(headers, user_agent):
                         id: categoryId
                     };
                 }).filter(cat => cat.title && cat.link && cat.id);
+                """,
+                """
+                // Try to find categories in any navigation element
+                return Array.from(document.querySelectorAll('nav a, .navigation a, .menu a')).map(el => {
+                    const href = el.getAttribute('href');
+                    if (!href || !href.includes('/c/')) return null;
+                    
+                    const categoryId = href.split('/c/').pop().trim();
+                    return {
+                        title: el.textContent.trim(),
+                        link: href,
+                        id: categoryId
+                    };
+                }).filter(cat => cat && cat.title && cat.link && cat.id);
+                """,
+                """
+                // Last resort - try to find any links that might be categories
+                return Array.from(document.querySelectorAll('a')).map(el => {
+                    const href = el.getAttribute('href');
+                    if (!href || !href.includes('/c/')) return null;
+                    
+                    const categoryId = href.split('/c/').pop().trim();
+                    return {
+                        title: el.textContent.trim(),
+                        link: href,
+                        id: categoryId
+                    };
+                }).filter(cat => cat && cat.title && cat.link && cat.id);
                 """
             ]
             
@@ -570,6 +606,22 @@ def get_rimi_categories(headers, user_agent):
                 except Exception as e:
                     logger.warning(f"JavaScript extraction attempt failed: {str(e)}")
         
+        # If still no categories, try hardcoded fallback categories
+        if not categories:
+            logger.warning("No categories found through normal methods, using fallback categories")
+            fallback_categories = [
+                {"title": "Puu- ja köögiviljad", "link": "/epood/ee/c/puu-ja-koogiviljad", "id": "puu-ja-koogiviljad"},
+                {"title": "Liha ja kala", "link": "/epood/ee/c/liha-ja-kala", "id": "liha-ja-kala"},
+                {"title": "Piimatooted ja munad", "link": "/epood/ee/c/piimatooted-ja-munad", "id": "piimatooted-ja-munad"},
+                {"title": "Leivad ja saiad", "link": "/epood/ee/c/leivad-ja-saiad", "id": "leivad-ja-saiad"},
+                {"title": "Valmistoit", "link": "/epood/ee/c/valmistoit", "id": "valmistoit"},
+                {"title": "Külmutatud toit", "link": "/epood/ee/c/kulmutatud-toit", "id": "kulmutatud-toit"},
+                {"title": "Kuivained ja hommikusöök", "link": "/epood/ee/c/kuivained-ja-hommikusook", "id": "kuivained-ja-hommikusook"},
+                {"title": "Joogid", "link": "/epood/ee/c/joogid", "id": "joogid"},
+                {"title": "Maiustused ja snäkid", "link": "/epood/ee/c/maiustused-ja-snakid", "id": "maiustused-ja-snakid"}
+            ]
+            categories = fallback_categories
+            
         return categories
         
     except Exception as e:
@@ -602,6 +654,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
 
     result_products = []
     page = 1
+    max_pages = 5  # Limit to prevent infinite loops
 
     try:
         service = Service()
@@ -609,7 +662,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         logger.debug("Chrome driver successfully initialized")
 
-        while True:
+        while page <= max_pages:  # Add a maximum page limit to prevent infinite loops
             url = f"https://www.rimi.ee{category['link']}?pageSize=100&currentPage={page}"
             logger.debug(f"Loading page: {url}")
 
@@ -631,97 +684,150 @@ def get_rimi_items_by_category(category, headers, user_agent):
                 except Exception as e:
                     logger.debug(f"Cookie banner not found or couldn't be closed: {e}")
 
-                # Wait for products to load with better error handling
-                products = []
-                for attempt in range(3):
-                    try:
-                        logger.debug(f"Attempt {attempt+1}/3 to extract products")
-                        # Wait for the script containing product data to be loaded
-                        WebDriverWait(driver, 15).until(
-                            lambda d: d.execute_script(
-                                "return Array.from(document.querySelectorAll('script')).some(s => s.textContent.includes('dataLayer.push') && s.textContent.includes('impressions'))"
-                            )
-                        )
-                        
-                        # Extract products using JavaScript
-                        products = driver.execute_script('''
-                            const targetScript = Array.from(document.querySelectorAll("script")).find(s => 
-                                s.textContent.includes('dataLayer.push') && 
-                                s.textContent.includes('"impressions"') &&
-                                s.textContent.includes('ecommerce')
-                            );
-                            
-                            if (!targetScript) return [];
-                            
-                            try {
-                                const jsonStr = targetScript.textContent
-                                    .replace(/\\s+/g, ' ')  // Collapse whitespace
-                                    .match(/dataLayer\\.push\\(\\s*({.*?})\\s*\\)/)[1]  // Capture JSON
-                                    .replace(/'/g, '"')     // Standardize quotes
-                                    .replace(/([{,])(\\s*)([A-Za-z_]+)(\\s*):/g, '$1"$3":')  // Fix keys
-                                    .replace(/,\\s*}/g, '}');  // Remove trailing commas
-                                
-                                const parsed = JSON.parse(jsonStr);
-                                return parsed.ecommerce && parsed.ecommerce.impressions ? 
-                                    parsed.ecommerce.impressions : [];
-                            } catch (e) {
-                                console.error("Error parsing product data:", e);
-                                return [];
-                            }
-                        ''')
-                        
-                        if products and len(products) > 0:
-                            logger.debug(f"Successfully extracted {len(products)} products")
-                            break
-                        
-                        logger.warning("No products found in current attempt")
-                        if attempt < 2:  # Don't wait on last attempt
-                            time.sleep(5)
-                            # Scroll to trigger any lazy-loading
-                            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-                            time.sleep(2)
-                            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                            time.sleep(3)
-                    except Exception as e:
-                        logger.warning(f"Error extracting products (attempt {attempt+1}): {str(e)}")
-                        if attempt < 2:
-                            time.sleep(5)
-                            # Try refreshing the page
-                            driver.refresh()
-                            time.sleep(5)
+                # Scroll down to trigger lazy loading
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight*2/3);")
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(3)
 
-                # If no products found after retries, check if we're at the end or try alternative method
-                if len(products) == 0:
-                    # Try alternative method to get products
+                # Try multiple extraction methods in sequence
+                products = []
+                extraction_methods = [
+                    # Method 1: DataLayer extraction
+                    '''
+                    const targetScript = Array.from(document.querySelectorAll("script")).find(s => 
+                        s.textContent.includes('dataLayer.push') && 
+                        s.textContent.includes('"impressions"') &&
+                        s.textContent.includes('ecommerce')
+                    );
+                    
+                    if (!targetScript) return [];
+                    
+                    try {
+                        const jsonStr = targetScript.textContent
+                            .replace(/\\s+/g, ' ')  // Collapse whitespace
+                            .match(/dataLayer\\.push\\(\\s*({.*?})\\s*\\)/)[1]  // Capture JSON
+                            .replace(/'/g, '"')     // Standardize quotes
+                            .replace(/([{,])(\\s*)([A-Za-z_]+)(\\s*):/g, '$1"$3":')  // Fix keys
+                            .replace(/,\\s*}/g, '}');  // Remove trailing commas
+                        
+                        const parsed = JSON.parse(jsonStr);
+                        return parsed.ecommerce && parsed.ecommerce.impressions ? 
+                            parsed.ecommerce.impressions : [];
+                    } catch (e) {
+                        console.error("Error parsing product data:", e);
+                        return [];
+                    }
+                    ''',
+                    
+                    # Method 2: Direct DOM extraction
+                    '''
+                    return Array.from(document.querySelectorAll('.product-grid__item')).map(item => {
+                        try {
+                            const nameEl = item.querySelector('.card__name');
+                            const priceEl = item.querySelector('.card__price-regular');
+                            const idEl = item.querySelector('[data-product-code]');
+                            
+                            return {
+                                name: nameEl ? nameEl.textContent.trim() : '',
+                                price: priceEl ? priceEl.textContent.trim().replace('€', '').replace(',', '.').trim() : '',
+                                id: idEl ? idEl.getAttribute('data-product-code') : ''
+                            };
+                        } catch (e) {
+                            return null;
+                        }
+                    }).filter(p => p && p.name && p.price);
+                    ''',
+                    
+                    # Method 3: Alternative DOM selectors
+                    '''
+                    return Array.from(document.querySelectorAll('.js-product-container')).map(item => {
+                        try {
+                            const nameEl = item.querySelector('.name');
+                            const priceEl = item.querySelector('.price');
+                            const idEl = item.querySelector('[data-product-id]');
+                            
+                            return {
+                                name: nameEl ? nameEl.textContent.trim() : '',
+                                price: priceEl ? priceEl.textContent.trim().replace('€', '').replace(',', '.').trim() : '',
+                                id: idEl ? idEl.getAttribute('data-product-id') : ''
+                            };
+                        } catch (e) {
+                            return null;
+                        }
+                    }).filter(p => p && p.name && p.price);
+                    ''',
+                    
+                    # Method 4: Generic product card extraction
+                    '''
+                    return Array.from(document.querySelectorAll('[class*="product"],[class*="card"]')).map(item => {
+                        try {
+                            // Look for elements that might contain product name
+                            const nameEl = item.querySelector('[class*="name"],[class*="title"]');
+                            
+                            // Look for elements that might contain price
+                            const priceEl = item.querySelector('[class*="price"]');
+                            
+                            // Look for product ID in data attributes
+                            const id = item.getAttribute('data-product-code') || 
+                                      item.getAttribute('data-product-id') || 
+                                      item.getAttribute('data-id') || 
+                                      '';
+                            
+                            return {
+                                name: nameEl ? nameEl.textContent.trim() : '',
+                                price: priceEl ? priceEl.textContent.trim().replace('€', '').replace(',', '.').trim() : '',
+                                id: id
+                            };
+                        } catch (e) {
+                            return null;
+                        }
+                    }).filter(p => p && p.name && p.price);
+                    '''
+                ]
+                
+                # Try each extraction method
+                for method_index, method in enumerate(extraction_methods):
                     try:
-                        logger.debug("Trying alternative product extraction method")
-                        alternative_products = driver.execute_script('''
-                            return Array.from(document.querySelectorAll('.product-grid__item')).map(item => {
-                                try {
-                                    const nameEl = item.querySelector('.card__name');
-                                    const priceEl = item.querySelector('.card__price-regular');
-                                    const idEl = item.querySelector('[data-product-code]');
-                                    
-                                    return {
-                                        name: nameEl ? nameEl.textContent.trim() : '',
-                                        price: priceEl ? priceEl.textContent.trim().replace('€', '').replace(',', '.').trim() : '',
-                                        id: idEl ? idEl.getAttribute('data-product-code') : ''
-                                    };
-                                } catch (e) {
-                                    return null;
-                                }
-                            }).filter(p => p && p.name && p.price);
+                        logger.debug(f"Trying product extraction method {method_index + 1}/{len(extraction_methods)}")
+                        extracted_products = driver.execute_script(method)
+                        
+                        if extracted_products and len(extracted_products) > 0:
+                            logger.debug(f"Method {method_index + 1} found {len(extracted_products)} products")
+                            products = extracted_products
+                            break
+                        else:
+                            logger.debug(f"Method {method_index + 1} found no products")
+                    except Exception as e:
+                        logger.warning(f"Error with extraction method {method_index + 1}: {str(e)}")
+                
+                # Check if we found any products
+                if len(products) == 0:
+                    # Check if we're on a page with no products (end of pagination or empty category)
+                    try:
+                        no_products_text = driver.execute_script('''
+                            const emptyEl = document.querySelector('.empty-search-results') || 
+                                           document.querySelector('.no-results') ||
+                                           document.querySelector('.empty-results');
+                            return emptyEl ? emptyEl.textContent.trim() : '';
                         ''')
                         
-                        if alternative_products and len(alternative_products) > 0:
-                            logger.debug(f"Found {len(alternative_products)} products using alternative method")
-                            products = alternative_products
-                        else:
-                            logger.info(f"No more products found on page {page}, stopping pagination")
+                        if no_products_text:
+                            logger.info(f"Category appears to be empty or end of pagination: '{no_products_text}'")
                             break
                     except Exception as e:
-                        logger.error(f"Alternative product extraction failed: {str(e)}")
-                        logger.info(f"No more products found on page {page}, stopping pagination")
+                        logger.warning(f"Error checking for empty results: {str(e)}")
+                    
+                    # If we're on page 1 and found no products, try one more time with a refresh
+                    if page == 1:
+                        logger.warning("No products found on first page, trying with refresh")
+                        driver.refresh()
+                        time.sleep(10)
+                        continue
+                    else:
+                        logger.info(f"No more products found after page {page-1}, stopping pagination")
                         break
 
                 logger.debug(f"Raw products found on page {page}: {len(products)}")
@@ -750,16 +856,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
                             'unit_name': unit_name
                         })
                         valid_products_count += 1
-
-                        logger.debug(f"""
-                            Processing raw item data:
-                            - Name: {name}
-                            - Price: {price}
-                            - Image: {image_url}
-                            - Weight Value: {weight_value}
-                            - Unit Name: {unit_name}
-                        """)
-
                     except Exception as e:
                         logger.warning(f"Error parsing product: {str(e)}")
                         continue
@@ -767,9 +863,15 @@ def get_rimi_items_by_category(category, headers, user_agent):
                 logger.debug(f"Valid products added from page {page}: {valid_products_count}")
                 logger.debug(f"Current total products: {len(result_products)}")
 
-                page += 1
-                # Use a longer delay between pages to avoid rate limits
-                time.sleep(random_delay(2, 4))
+                # If we found products, continue to next page
+                if valid_products_count > 0:
+                    page += 1
+                    # Use a longer delay between pages to avoid rate limits
+                    time.sleep(random_delay(2, 4))
+                else:
+                    # If we didn't find any valid products, stop pagination
+                    logger.info(f"No valid products found on page {page}, stopping pagination")
+                    break
 
             except Exception as e:
                 logger.error(f"Error loading page: {str(e)}")
