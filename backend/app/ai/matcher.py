@@ -473,6 +473,7 @@ def extract_key_product_words(product_name: str) -> List[str]:
 def check_product_compatibility(n1: str, n2: str) -> Tuple[bool, float]:
     """
     Check if two products are compatible by analyzing their key product words.
+    Uses pure semantic analysis without hardcoded lists.
     Returns a tuple (is_compatible, compatibility_score).
     """
     # Extract key product words
@@ -483,56 +484,107 @@ def check_product_compatibility(n1: str, n2: str) -> Tuple[bool, float]:
     logger.debug(f"Key words for '{n2}': {key_words2}")
     
     if not key_words1 or not key_words2:
-        # If we couldn't extract key words, we can't determine incompatibility
         return True, 50.0
-    
+
     # Get embeddings for all key words
     key_embs1 = [get_text_embedding(word) for word in key_words1]
     key_embs2 = [get_text_embedding(word) for word in key_words2]
     
-    # Find the best matching key word between products
-    best_match_score = 0.0
-    
+    # Calculate pairwise similarities between key words
+    similarities = []
     for emb1 in key_embs1:
         for emb2 in key_embs2:
-            similarity = float(util.cos_sim(emb1, emb2)[0][0])
-            best_match_score = max(best_match_score, similarity)
+            sim = float(util.cos_sim(emb1.reshape(1, -1), emb2.reshape(1, -1))[0][0])
+            similarities.append(sim)
     
-    # Convert to percentage score
-    compatibility_score = best_match_score * 100.0
+    # Analyze similarity distribution
+    similarities = np.array(similarities)
+    mean_sim = np.mean(similarities)
+    max_sim = np.max(similarities)
+    min_sim = np.min(similarities)
+    std_sim = np.std(similarities)
     
-    # Dynamically determine compatibility threshold based on word distribution
-    # Calculate average similarity within each product's key words
-    within_product1_sim = 0.0
-    within_product2_sim = 0.0
+    # If there's high variance in similarities, it indicates different product types
+    # High variance means some words match well while others don't - typical for similar but different products
+    if std_sim > 0.3 and max_sim - min_sim > 0.6:
+        logger.info(f"High similarity variance indicates different products: std={std_sim:.2f}, range={max_sim-min_sim:.2f}")
+        return False, mean_sim * 50.0  # Reduced score due to high variance
     
-    # Calculate internal similarity for product 1
-    if len(key_embs1) > 1:
-        count = 0
-        for i in range(len(key_embs1)):
-            for j in range(i+1, len(key_embs1)):
-                within_product1_sim += float(util.cos_sim(key_embs1[i], key_embs1[j])[0][0])
-                count += 1
-        within_product1_sim = within_product1_sim / count if count > 0 else 0.0
+    # Calculate semantic clusters for each product's key words
+    def get_semantic_clusters(embeddings: List[np.ndarray], threshold: float = 0.7) -> List[List[int]]:
+        n = len(embeddings)
+        if n == 0:
+            return []
+            
+        # Build similarity matrix
+        sim_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                sim_matrix[i,j] = float(util.cos_sim(
+                    embeddings[i].reshape(1, -1),
+                    embeddings[j].reshape(1, -1)
+                )[0][0])
+        
+        # Find clusters
+        clusters = []
+        used = set()
+        for i in range(n):
+            if i in used:
+                continue
+            cluster = [i]
+            used.add(i)
+            for j in range(i+1, n):
+                if j not in used and sim_matrix[i,j] > threshold:
+                    cluster.append(j)
+                    used.add(j)
+            clusters.append(cluster)
+        return clusters
+
+    clusters1 = get_semantic_clusters(key_embs1)
+    clusters2 = get_semantic_clusters(key_embs2)
     
-    # Calculate internal similarity for product 2
-    if len(key_embs2) > 1:
-        count = 0
-        for i in range(len(key_embs2)):
-            for j in range(i+1, len(key_embs2)):
-                within_product2_sim += float(util.cos_sim(key_embs2[i], key_embs2[j])[0][0])
-                count += 1
-        within_product2_sim = within_product2_sim / count if count > 0 else 0.0
+    # If products have different numbers of semantic clusters, they're likely different
+    if abs(len(clusters1) - len(clusters2)) > 1:
+        logger.info(f"Different semantic cluster counts: {len(clusters1)} vs {len(clusters2)}")
+        return False, mean_sim * 60.0
     
-    # Average internal similarity
-    avg_internal_sim = (within_product1_sim + within_product2_sim) / 2.0
+    # Compare cluster centroids between products
+    def get_cluster_centroid(embeddings: List[np.ndarray], cluster: List[int]) -> np.ndarray:
+        if not cluster:
+            return np.zeros(ESTBERT_DIM)
+        cluster_embs = [embeddings[i] for i in cluster]
+        return np.mean(cluster_embs, axis=0)
     
-    # Dynamic threshold: products should be at least as similar between them as they are internally
-    # but with a minimum reasonable baseline
-    threshold = max(0.35, avg_internal_sim) * 100.0
+    cluster_sims = []
+    for c1 in clusters1:
+        centroid1 = get_cluster_centroid(key_embs1, c1)
+        best_sim = 0.0
+        for c2 in clusters2:
+            centroid2 = get_cluster_centroid(key_embs2, c2)
+            sim = float(util.cos_sim(
+                centroid1.reshape(1, -1),
+                centroid2.reshape(1, -1)
+            )[0][0])
+            best_sim = max(best_sim, sim)
+        cluster_sims.append(best_sim)
     
-    # Products are compatible if their key words are sufficiently similar
-    is_compatible = compatibility_score > threshold
+    # If any major cluster doesn't have a good match, products are different
+    if any(sim < 0.6 for sim in cluster_sims):
+        logger.info(f"Some semantic clusters don't match well: {cluster_sims}")
+        return False, mean_sim * 70.0
+    
+    # Calculate final compatibility score based on all analyses
+    compatibility_score = (
+        np.mean(cluster_sims) * 0.5 +  # Cluster similarity
+        (1.0 - std_sim) * 0.3 +        # Consistency of similarities
+        max_sim * 0.2                   # Best individual word match
+    ) * 100.0
+    
+    # Products are compatible if their semantic structure is similar enough
+    threshold = 75.0 - (len(key_words1) + len(key_words2)) * 2.0  # Lower threshold for longer names
+    threshold = max(60.0, min(threshold, 80.0))  # Keep threshold in reasonable range
+    
+    is_compatible = compatibility_score >= threshold
     
     logger.debug(f"Product compatibility: {compatibility_score:.1f}% vs threshold {threshold:.1f}% - {'Compatible' if is_compatible else 'Incompatible'}")
     
@@ -603,7 +655,7 @@ def match_products(n1: str, n2: str, w1: Optional[str], w2: Optional[str],
             # Check if these are significantly different words
             word1_emb = get_text_embedding(word1)
             word2_emb = get_text_embedding(word2)
-            word_similarity = float(util.cos_sim(word1_emb, word2_emb)[0][0])
+            word_similarity = float(util.cos_sim(word1_emb.reshape(1, -1), word2_emb.reshape(1, -1))[0][0])
             
             # Dynamic threshold based on the similarity of the rest of the words
             common_words1 = [w for w in words1 if w != word1]
@@ -614,7 +666,7 @@ def match_products(n1: str, n2: str, w1: Optional[str], w2: Optional[str],
             common_text2 = " ".join(common_words2)
             common_emb1 = get_text_embedding(common_text1)
             common_emb2 = get_text_embedding(common_text2)
-            common_similarity = float(util.cos_sim(common_emb1, common_emb2)[0][0])
+            common_similarity = float(util.cos_sim(common_emb1.reshape(1, -1), common_emb2.reshape(1, -1))[0][0])
             
             # If common words are very similar but the differing word is not,
             # these are different products with the same pattern
@@ -633,7 +685,7 @@ def match_products(n1: str, n2: str, w1: Optional[str], w2: Optional[str],
         e2 = get_text_embedding(clean_n2)
         
         # Calculate direct semantic similarity between products
-        semantic_similarity = float(util.cos_sim(e1, e2)[0][0] * 100.0)
+        semantic_similarity = float(util.cos_sim(e1.reshape(1, -1), e2.reshape(1, -1))[0][0]) * 100.0
         
         logger.debug(f"Semantic similarity between '{clean_n1}' and '{clean_n2}': {semantic_similarity:.1f}%")
         
