@@ -33,6 +33,7 @@ class EstBERTSentenceTransformer:
         self.model = AutoModel.from_pretrained(model_name)
         # Set model to evaluation mode
         self.model.eval()
+        self.output_dim = 768  # EstBERT's output dimension
         
     def mean_pooling(self, model_output, attention_mask):
         """Mean Pooling - Take attention mask into account for correct averaging"""
@@ -45,40 +46,50 @@ class EstBERTSentenceTransformer:
         """
         Encode texts to vector embeddings
         """
-        # Convert string to list if it's a single text
-        if isinstance(texts, str):
-            texts = [texts]
+        try:
+            # Convert string to list if it's a single text
+            if isinstance(texts, str):
+                texts = [texts]
+                
+            all_embeddings = []
             
-        all_embeddings = []
-        
-        # Process in batches for memory efficiency
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
+            # Process in batches for memory efficiency
+            for i in range(0, len(texts), batch_size):
+                batch_texts = texts[i:i+batch_size]
+                
+                # Tokenize
+                encoded_input = self.tokenizer(batch_texts, padding=True, truncation=True, return_tensors='pt', max_length=128)
+                
+                # Get embeddings
+                with torch.no_grad():
+                    model_output = self.model(**encoded_input)
+                
+                # Pool to get sentence embeddings
+                sentence_embeddings = self.mean_pooling(model_output, encoded_input['attention_mask'])
+                
+                # Normalize embeddings
+                sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
+                
+                all_embeddings.append(sentence_embeddings.numpy())
+                
+            # Concatenate batches
+            if len(all_embeddings) > 0:
+                all_embeddings = np.vstack(all_embeddings)
+                
+            return all_embeddings
             
-            # Tokenize
-            encoded_input = self.tokenizer(batch_texts, padding=True, truncation=True, return_tensors='pt', max_length=128)
-            
-            # Get embeddings
-            with torch.no_grad():
-                model_output = self.model(**encoded_input)
-            
-            # Pool to get sentence embeddings
-            sentence_embeddings = self.mean_pooling(model_output, encoded_input['attention_mask'])
-            
-            # Normalize embeddings
-            sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-            
-            all_embeddings.append(sentence_embeddings.numpy())
-            
-        # Concatenate batches
-        if len(all_embeddings) > 0:
-            all_embeddings = np.vstack(all_embeddings)
-            
-        return all_embeddings
+        except Exception as e:
+            logger.error(f"Error in EstBERT encoding: {str(e)}")
+            # Return zero vector with correct dimensionality
+            return np.zeros((len(texts), self.output_dim), dtype=np.float32)
 
 # Initialize both models - general multilingual and Estonian-specific
 general_sentence_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 estonian_sentence_model = EstBERTSentenceTransformer()
+
+# Cache the model dimensions
+ESTBERT_DIM = 768  # EstBERT's output dimension
+GENERAL_DIM = 384  # all-MiniLM-L6-v2's output dimension
 
 image_model = models.resnet50(weights="IMAGENET1K_V2")
 image_model.eval()
@@ -126,32 +137,55 @@ def preprocess_text(t: str) -> str:
 def get_text_embedding(t: str) -> np.ndarray:
     """
     Get text embedding using the most appropriate model for the input text.
-    The function automatically selects the best model without hardcoded language rules.
+    Returns a normalized embedding vector of consistent dimensionality (768).
     """
-    if not t:
-        # Return zero vector with proper dimensionality for empty text
-        return np.zeros(768, dtype=np.float32)  # EstBERT dimension is 768
-    
-    # For short texts, always use EstBERT to ensure consistency
-    if len(t) < 5:
-        return estonian_sentence_model.encode(t)
-    
-    # Get embeddings from both models
-    est_embedding = estonian_sentence_model.encode(t)
-    gen_embedding = general_sentence_model.encode(t)
-    
-    # Compute confidence scores for each model by looking at embedding statistics
-    # EstBERT will produce more pronounced, confident embeddings for Estonian text
-    est_confidence = np.std(est_embedding) * np.max(np.abs(est_embedding))
-    gen_confidence = np.std(gen_embedding) * np.max(np.abs(gen_embedding))
-    
-    # Select the model with higher confidence
-    if est_confidence > gen_confidence:
-        logger.debug(f"Selected EstBERT model based on embedding confidence")
-        return est_embedding
-    else:
-        logger.debug(f"Selected general model based on embedding confidence")
-        return gen_embedding
+    try:
+        if not t:
+            return np.zeros(ESTBERT_DIM, dtype=np.float32)
+        
+        # For short texts, always use EstBERT to ensure consistency
+        if len(t) < 5:
+            emb = estonian_sentence_model.encode(t)[0]
+            return emb
+        
+        # Get embeddings from both models
+        try:
+            est_embedding = estonian_sentence_model.encode(t)[0]  # 768-dim
+        except Exception as e:
+            logger.error(f"EstBERT embedding failed: {str(e)}")
+            est_embedding = np.zeros(ESTBERT_DIM, dtype=np.float32)
+            
+        try:
+            gen_embedding = general_sentence_model.encode(t)  # 384-dim
+            # Pad general embedding to match EstBERT dimensionality
+            gen_embedding_padded = np.pad(gen_embedding, (0, ESTBERT_DIM - GENERAL_DIM), 'constant')
+        except Exception as e:
+            logger.error(f"General model embedding failed: {str(e)}")
+            gen_embedding_padded = np.zeros(ESTBERT_DIM, dtype=np.float32)
+        
+        # Compute confidence scores for each model
+        est_confidence = np.std(est_embedding) * np.max(np.abs(est_embedding))
+        gen_confidence = np.std(gen_embedding) * np.max(np.abs(gen_embedding))
+        
+        # Select the model with higher confidence
+        if est_confidence > gen_confidence:
+            logger.debug(f"Selected EstBERT model for '{t}'")
+            final_embedding = est_embedding
+        else:
+            logger.debug(f"Selected general model for '{t}'")
+            final_embedding = gen_embedding_padded
+            
+        # Ensure the output is normalized and has the correct shape
+        final_embedding = final_embedding.reshape(ESTBERT_DIM)
+        norm = np.linalg.norm(final_embedding)
+        if norm > 1e-8:
+            final_embedding = final_embedding / norm
+            
+        return final_embedding
+        
+    except Exception as e:
+        logger.error(f"Error in get_text_embedding for text '{t}': {str(e)}")
+        return np.zeros(ESTBERT_DIM, dtype=np.float32)
 
 def get_image_embedding_from_url(url: str) -> np.ndarray:
     try:
@@ -659,136 +693,171 @@ class FaissIndexWrapper:
 # ------------------ FULL PIPELINE ------------------
 
 def run_ai_matching(db_session):
-    """Run AI matching on unmatched products"""
+    """Run AI matching on unmatched products with improved connection handling"""
     try:
         logger.info("Starting AI product matching")
         
-        # Get all unmatched products with valid names and last_matched older than threshold
-        unmatched_products = db_session.query(ProductStoreData).filter(
-            ProductStoreData.product_id.is_(None),
-            ProductStoreData.store_product_name.isnot(None),
-            or_(
-                ProductStoreData.last_matched.is_(None),
-                ProductStoreData.last_matched < func.now() - timedelta(days=7)
-            )
-        ).order_by(func.random()).limit(1000).all()
+        # Process in smaller batches to avoid connection timeouts
+        BATCH_SIZE = 100
+        MAX_RETRIES = 3
+        RETRY_DELAY = 5  # seconds
         
-        if not unmatched_products:
-            logger.info("No unmatched products found")
-            return
-            
-        logger.info(f"Found {len(unmatched_products)} unmatched products")
+        total_matched = 0
+        total_created = 0
+        total_processed = 0
         
-        # Process each unmatched product
-        matched_count = 0
-        created_count = 0
-        
-        for psd in unmatched_products:
-            # Skip if no name or skip certain patterns
-            if not psd.store_product_name or "SKIP" in psd.store_product_name:
-                continue
-                
-            # Find potential semantic matches using embeddings
-            embedding = get_text_embedding(preprocess_text(psd.store_product_name))
+        while True:
+            retry_count = 0
+            batch_success = False
             
-            # Query for similar products using vector similarity (ideally this would use
-            # a vector database, but we're simulating the approach)
-            similar_products = []
-            
-            # Fallback to text search if needed
-            if not similar_products:
-                # Find similar products using trigram similarity
-                similar_products = db_session.query(ProductStoreData).filter(
-                    ProductStoreData.store_id != psd.store_id,
-                    func.similarity(ProductStoreData.store_product_name, psd.store_product_name) > 0.3
-                ).order_by(
-                    func.similarity(ProductStoreData.store_product_name, psd.store_product_name).desc()
-                ).limit(20).all()
-
-            if similar_products:
-                logger.debug(f"Found {len(similar_products)} potential matches for {psd.store_product_name}")
-
-            best_match = None
-            best_score = 0.0
-
-            for candidate in similar_products:
-                db_session.refresh(candidate)
-                matched, score = match_products(
-                    psd.store_product_name, candidate.store_product_name,
-                    psd.store_weight_value, candidate.store_weight_value,
-                    psd.store_image_url, candidate.store_image_url,
-                    psd.store_unit, candidate.store_unit,
-                    psd.ean, candidate.ean
-                )
-                if matched and score > best_score:
-                    best_match = candidate
-                    best_score = score
-
-            if best_match and best_score >= 82.0:  # Threshold for matching
-                logger.info(f"Found AI match for {psd.store_product_name} with score {best_score:.1f}%")
-                if best_match.product_id:
-                    psd.product_id = best_match.product_id
-                else:
-                    logger.info(f"Creating new product from AI match for {psd.store_product_name}")
-                    new_product = Product(
-                        name=psd.store_product_name,
-                        weight_value=psd.store_weight_value,
-                        unit_id=psd.store_unit_id,
-                        image_url=psd.store_image_url,
-                        barcode=psd.ean
-                    )
-                    db_session.add(new_product)
-                    db_session.flush()
+            while not batch_success and retry_count < MAX_RETRIES:
+                try:
+                    # Get a batch of unmatched products
+                    unmatched_products = db_session.query(ProductStoreData).filter(
+                        ProductStoreData.product_id.is_(None),
+                        ProductStoreData.store_product_name.isnot(None),
+                        or_(
+                            ProductStoreData.last_matched.is_(None),
+                            ProductStoreData.last_matched < func.now() - timedelta(days=7)
+                        )
+                    ).order_by(func.random()).limit(BATCH_SIZE).all()
                     
-                    psd.product_id = new_product.product_id
-                    best_match.product_id = new_product.product_id
-                    created_count += 1
-                
-                psd.last_matched = func.now()
-                
-                match_log = ProductMatchingLog(
-                    product_store_id=psd.product_store_id,
-                    product_id=psd.product_id,
-                    confidence_score=best_score,
-                    matched_by="ai_matcher"
-                )
-                db_session.add(match_log)
-                matched_count += 1
-            else:
-                logger.info(f"No match found for {psd.store_product_name}, creating new product")
-                new_product = Product(
-                    name=psd.store_product_name,
-                    weight_value=psd.store_weight_value,
-                    unit_id=psd.store_unit_id,
-                    image_url=psd.store_image_url,
-                    barcode=psd.ean
-                )
-                db_session.add(new_product)
-                db_session.flush()
-                
-                psd.product_id = new_product.product_id
-                psd.last_matched = func.now()
-                created_count += 1
-                
-                match_log = ProductMatchingLog(
-                    product_store_id=psd.product_store_id,
-                    product_id=psd.product_id,
-                    confidence_score=0.0,
-                    matched_by="new_product_created"
-                )
-                db_session.add(match_log)
-            
-            db_session.commit()
-            
-        logger.info(f"""Matching completed:
-        - Matched: {matched_count} products
-        - Created new: {created_count} products
-        - Success rate: {((matched_count + created_count) / len(unmatched_products) * 100):.1f}%""")
+                    if not unmatched_products:
+                        logger.info("No more unmatched products found")
+                        return {
+                            "matched": total_matched,
+                            "created": total_created,
+                            "processed": total_processed
+                        }
+                    
+                    logger.info(f"Processing batch of {len(unmatched_products)} unmatched products")
+                    
+                    batch_matched = 0
+                    batch_created = 0
+                    
+                    for psd in unmatched_products:
+                        try:
+                            # Start a nested transaction for each product
+                            with db_session.begin_nested():
+                                # Skip if no name or skip certain patterns
+                                if not psd.store_product_name or "SKIP" in psd.store_product_name:
+                                    continue
+                                
+                                # Find similar products using trigram similarity
+                                similar_products = db_session.query(ProductStoreData).filter(
+                                    ProductStoreData.store_id != psd.store_id,
+                                    func.similarity(ProductStoreData.store_product_name, psd.store_product_name) > 0.3
+                                ).order_by(
+                                    func.similarity(ProductStoreData.store_product_name, psd.store_product_name).desc()
+                                ).limit(20).all()
+                                
+                                if similar_products:
+                                    logger.debug(f"Found {len(similar_products)} potential matches for {psd.store_product_name}")
+                                
+                                best_match = None
+                                best_score = 0.0
+                                
+                                for candidate in similar_products:
+                                    db_session.refresh(candidate)
+                                    matched, score = match_products(
+                                        psd.store_product_name, candidate.store_product_name,
+                                        psd.store_weight_value, candidate.store_weight_value,
+                                        psd.store_image_url, candidate.store_image_url,
+                                        psd.store_unit, candidate.store_unit,
+                                        psd.ean, candidate.ean
+                                    )
+                                    if matched and score > best_score:
+                                        best_match = candidate
+                                        best_score = score
+                                
+                                if best_match and best_score >= 82.0:  # Threshold for matching
+                                    logger.info(f"Found AI match for {psd.store_product_name} with score {best_score:.1f}%")
+                                    if best_match.product_id:
+                                        psd.product_id = best_match.product_id
+                                    else:
+                                        logger.info(f"Creating new product from AI match for {psd.store_product_name}")
+                                        new_product = Product(
+                                            name=psd.store_product_name,
+                                            weight_value=psd.store_weight_value,
+                                            unit_id=psd.store_unit_id,
+                                            image_url=psd.store_image_url,
+                                            barcode=psd.ean
+                                        )
+                                        db_session.add(new_product)
+                                        db_session.flush()
+                                        
+                                        psd.product_id = new_product.product_id
+                                        best_match.product_id = new_product.product_id
+                                        batch_created += 1
+                                    
+                                    psd.last_matched = func.now()
+                                    
+                                    match_log = ProductMatchingLog(
+                                        product_store_id=psd.product_store_id,
+                                        product_id=psd.product_id,
+                                        confidence_score=best_score,
+                                        matched_by="ai_matcher"
+                                    )
+                                    db_session.add(match_log)
+                                    batch_matched += 1
+                                else:
+                                    logger.info(f"No match found for {psd.store_product_name}, creating new product")
+                                    new_product = Product(
+                                        name=psd.store_product_name,
+                                        weight_value=psd.store_weight_value,
+                                        unit_id=psd.store_unit_id,
+                                        image_url=psd.store_image_url,
+                                        barcode=psd.ean
+                                    )
+                                    db_session.add(new_product)
+                                    db_session.flush()
+                                    
+                                    psd.product_id = new_product.product_id
+                                    psd.last_matched = func.now()
+                                    batch_created += 1
+                                    
+                                    match_log = ProductMatchingLog(
+                                        product_store_id=psd.product_store_id,
+                                        product_id=psd.product_id,
+                                        confidence_score=0.0,
+                                        matched_by="new_product_created"
+                                    )
+                                    db_session.add(match_log)
+                        
+                        except Exception as product_error:
+                            logger.error(f"Error processing product {psd.store_product_name}: {str(product_error)}")
+                            continue
+                    
+                    # Commit the batch
+                    db_session.commit()
+                    
+                    total_matched += batch_matched
+                    total_created += batch_created
+                    total_processed += len(unmatched_products)
+                    
+                    logger.info(f"""Batch completed:
+                    - Matched: {batch_matched} products
+                    - Created new: {batch_created} products
+                    - Total processed: {total_processed}""")
+                    
+                    batch_success = True
+                    
+                except Exception as batch_error:
+                    retry_count += 1
+                    logger.error(f"Batch processing error (attempt {retry_count}/{MAX_RETRIES}): {str(batch_error)}")
+                    db_session.rollback()
+                    
+                    if retry_count < MAX_RETRIES:
+                        import time
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        logger.error("Max retries reached, stopping process")
+                        return {
+                            "matched": total_matched,
+                            "created": total_created,
+                            "processed": total_processed
+                        }
         
-        return {
-            "matched": matched_count,
-            "created": created_count
-        }
     except Exception as e:
         logger.error(f"Error during matching process: {str(e)}", exc_info=True)
         db_session.rollback()
