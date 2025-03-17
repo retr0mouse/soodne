@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 import re
 from sqlalchemy import func, or_
 from app.core.logger import setup_logger
@@ -10,6 +10,11 @@ from app.utils.brands import getBrand
 import nltk
 from collections import Counter
 import string
+import os
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from openpyxl import load_workbook
+import io
 
 logger = setup_logger("app.ai.matcher")
 
@@ -340,26 +345,44 @@ class EstonianProductNLP:
         total_similarity = 0
         total_pairs = 0
         
+        length_weights = {}
+        for word in words1 + words2:
+            if len(word) > 10:
+                length_weights[word] = 0.6
+            elif len(word) > 7:
+                length_weights[word] = 0.8
+            else:
+                length_weights[word] = 1.0
+        
         for word1 in words1:
             max_similarity = 0
+            max_word = None
             for word2 in words2:
                 similarity = self._levenshtein_similarity(word1, word2)
-                max_similarity = max(max_similarity, similarity)
+                if similarity > max_similarity:
+                    max_similarity = similarity
+                    max_word = word2
             
             if max_similarity > 0.7:
-                total_similarity += max_similarity
-                total_pairs += 1
-                
+                word_weight = min(length_weights[word1], length_weights.get(max_word, 1.0))
+                total_similarity += max_similarity * word_weight
+                total_pairs += word_weight
+            
         for word2 in words2:
             max_similarity = 0
+            max_word = None
             for word1 in words1:
                 similarity = self._levenshtein_similarity(word2, word1)
-                max_similarity = max(max_similarity, similarity)
+                if similarity > max_similarity:
+                    max_similarity = similarity
+                    max_word = word1
             
             if max_similarity > 0.7:
-                total_similarity += max_similarity
-                total_pairs += 1
-                
+                # Применяем вес в зависимости от длины слова
+                word_weight = min(length_weights[word2], length_weights.get(max_word, 1.0))
+                total_similarity += max_similarity * word_weight
+                total_pairs += word_weight
+            
         if total_pairs > 0:
             return total_similarity / total_pairs
         
@@ -546,6 +569,52 @@ class EstonianProductNLP:
         return any(char.isdigit() for char in text)
 
 estonian_nlp = EstonianProductNLP()
+
+# Function to save potential matches to Excel file
+def save_potential_matches_to_file(first_product, second_product, score):
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d")
+        filename = f"potential_matches_{timestamp}.xlsx"
+        
+        # Create a new workbook if file doesn't exist
+        if not os.path.isfile(filename):
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Potential Matches"
+            headers = ['First Product', 'Second Product', 'Score', 'Timestamp']
+            for col_num, header in enumerate(headers, 1):
+                col_letter = get_column_letter(col_num)
+                ws[f'{col_letter}1'] = header
+                ws.column_dimensions[col_letter].width = 40  # Set column width
+        else:
+            # Load existing workbook
+            wb = load_workbook(filename)
+            ws = wb["Potential Matches"]
+        
+        # Add new row
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = [first_product, second_product, f"{score:.1f}%", current_time]
+        ws.append(row)
+        
+        # Auto-adjust columns width for better readability
+        for column in ws.columns:
+            max_length = 0
+            column_letter = get_column_letter(column[0].column)
+            for cell in column:
+                if cell.value:
+                    cell_length = len(str(cell.value))
+                    if cell_length > max_length:
+                        max_length = cell_length
+            adjusted_width = max_length + 2
+            ws.column_dimensions[column_letter].width = adjusted_width if adjusted_width > 15 else 15
+        
+        # Save the file
+        wb.save(filename)
+            
+        return True
+    except Exception as e:
+        logger.error(f"Error saving potential match to file: {str(e)}")
+        return False
 
 def run_matching(db_session):
     """Run matching based on weight and title similarity with Estonian NLP"""
@@ -754,7 +823,15 @@ def run_matching(db_session):
             if first_brand and first_brand in brand_thresholds:
                 match_threshold = brand_thresholds[first_brand]['threshold']
 
-            if best_match and best_score >= match_threshold:
+            # Save matches between 65% and 80% to file (no console logging)
+            if best_match and best_score < 80.0 and best_score >= 65.0:
+                save_potential_matches_to_file(
+                    first_candidate.store_product_name,
+                    best_match.store_product_name,
+                    best_score
+                )
+
+            if best_match and best_score >= 80.0:
                 logger.info(f"NLP match found for {first_candidate.store_product_name} and {best_match.store_product_name} with score {best_score:.1f}%")
 
                 nlp_features = {
