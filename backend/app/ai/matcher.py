@@ -553,6 +553,64 @@ def run_matching(db_session):
 
         unmatched_products = db_session.query(ProductStoreData).all()
         
+        ean_matched_count = 0
+        for first_candidate in unmatched_products:
+            if not first_candidate.ean:
+                continue
+                
+            ean_matches = db_session.query(ProductStoreData).filter(
+                ProductStoreData.store_id != first_candidate.store_id,
+                ProductStoreData.ean == first_candidate.ean,
+                ProductStoreData.ean.isnot(None)
+            ).all()
+            
+            if ean_matches:
+                ean_match = ean_matches[0]
+                
+                if ean_match.product_id is not None:
+                    first_candidate.product_id = ean_match.product_id
+                    first_candidate.last_matched = func.now()
+                    ean_matched_count += 1
+                    db_session.commit()
+                    logger.info(f"EAN match found: {first_candidate.store_product_name} → {ean_match.store_product_name} (EAN: {first_candidate.ean})")
+                    
+                    product = db_session.query(schemas.Product).filter(
+                        schemas.Product.product_id == ean_match.product_id
+                    ).first()
+                    if product and not product.barcode:
+                        product.barcode = first_candidate.ean
+                        db_session.commit()
+                        logger.info(f"Updated product barcode: {product.product_id} → {first_candidate.ean}")
+                
+                elif first_candidate.product_id is not None:
+                    for match in ean_matches:
+                        match.product_id = first_candidate.product_id
+                        match.last_matched = func.now()
+                    ean_matched_count += len(ean_matches)
+                    db_session.commit()
+                    logger.info(f"Applied existing product_id to EAN matches: {first_candidate.ean}")
+                else:
+                    new_product = product_service.create(db_session, schemas.ProductCreate(
+                        name=first_candidate.store_product_name,
+                        weight_value=first_candidate.store_weight_value,
+                        unit_id=first_candidate.store_unit_id,
+                        barcode=first_candidate.ean
+                    ))
+                    first_candidate.product_id = new_product.product_id
+                    first_candidate.last_matched = func.now()
+                    
+                    for match in ean_matches:
+                        match.product_id = new_product.product_id
+                        match.last_matched = func.now()
+                    
+                    ean_matched_count += 1 + len(ean_matches)
+                    db_session.commit()
+                    logger.info(f"Created new product from EAN: {first_candidate.ean}")
+        
+        logger.info(f"EAN matching completed: {ean_matched_count} matches found")
+        
+        unmatched_products = [p for p in unmatched_products if p.product_id is None]
+        
         category_index = {}
         for product in unmatched_products:
             category_key = getattr(product, "category_id", None) 
