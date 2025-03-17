@@ -223,13 +223,16 @@ class EstonianProductNLP:
     
     def compare_products(self, product1, product2):
         """Compares two products based on extracted features"""
-        brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(product1)
-        brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(product2)
+        normalized_product1 = product1.lower().strip() if product1 else None
+        normalized_product2 = product2.lower().strip() if product2 else None
+        
+        brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(normalized_product1)
+        brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(normalized_product2)
         
         if brand1 != brand2:
             return 0.0
             
-        unique_words_score = self._compare_unique_words(product1, product2)
+        unique_words_score = self._compare_unique_words(normalized_product1, normalized_product2)
         if unique_words_score < 0.3:
             return 0.0
         
@@ -264,8 +267,8 @@ class EstonianProductNLP:
     
     def _compare_unique_words(self, product1, product2):
         """Compares rare and unique words in product names"""
-        tokens1 = self._tokenize(product1.lower())
-        tokens2 = self._tokenize(product2.lower())
+        tokens1 = self._tokenize(product1)
+        tokens2 = self._tokenize(product2)
         
         rare_words1 = []
         rare_words2 = []
@@ -551,6 +554,11 @@ def run_matching(db_session):
 
         estonian_nlp.initialize_from_data(db_session)
 
+        def normalize_string(text):
+            if text:
+                return text.lower().strip()
+            return text
+            
         unmatched_products = db_session.query(ProductStoreData).all()
         
         ean_matched_count = 0
@@ -674,11 +682,13 @@ def run_matching(db_session):
             if not first_candidate.store_product_name or "SKIP" in first_candidate.store_product_name:
                 continue
 
+            normalized_name = normalize_string(first_candidate.store_product_name)
+            
             similar_products = db_session.query(ProductStoreData).filter(
                 ProductStoreData.store_id != first_candidate.store_id,
-                func.similarity(ProductStoreData.store_product_name, first_candidate.store_product_name) > 0.3
+                func.similarity(func.lower(ProductStoreData.store_product_name), normalized_name) > 0.3
             ).order_by(
-                func.similarity(ProductStoreData.store_product_name, first_candidate.store_product_name).desc()
+                func.similarity(func.lower(ProductStoreData.store_product_name), normalized_name).desc()
             ).limit(20).all()
 
             first_brand, first_main_words, first_taste, first_attributes, first_type_indicators = estonian_nlp.extract_features(first_candidate.store_product_name)
