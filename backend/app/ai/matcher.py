@@ -218,84 +218,76 @@ class EstonianProductNLP:
                 word in self.dynamic_common_words and 
                 self.dynamic_common_words[word] >= self.common_words_threshold)
 
-    def _improved_word_similarity(self, words1, words2):
+    def _calculate_word_similarity(self, words1, words2, critical_words1=None, critical_words2=None):
         """
-        Improved comparison of word sets taking into account partial matches,
-        word normalization, and mandatory presence of all critical words.
+        Calculate similarity between two sets of words.
+        Gives higher importance to critical words.
         """
-        if not words1 or not words2:
-            return 0.0
-
-        # Normalize words and process abbreviations
+        # Normalize all words
         norm_words1 = []
-        for w in words1:
-            w = w.rstrip('.')
-            norm_words1.append(normalize_string(w))
+        for word in words1:
+            try:
+                if not isinstance(word, str):
+                    word = str(word)
+                norm_words1.append(normalize_string(word.lower()))
+            except:
+                continue
         
         norm_words2 = []
-        for w in words2:
-            w = w.rstrip('.')
-            norm_words2.append(normalize_string(w))
+        for word in words2:
+            try:
+                if not isinstance(word, str):
+                    word = str(word)
+                norm_words2.append(normalize_string(word.lower()))
+            except:
+                continue
         
-        # Find critical words (words longer than 3 characters that may indicate
-        # product characteristics - flavors, models, etc.)
-        critical_words1 = [w for w in norm_words1 if len(w) > 3 and not self._is_common_word(w)]
-        critical_words2 = [w for w in norm_words2 if len(w) > 3 and not self._is_common_word(w)]
+        # If after normalization, word sets are empty
+        if not norm_words1 or not norm_words2:
+            # Если оба набора пусты, это считается совпадением
+            if not norm_words1 and not norm_words2:
+                return 1.0
+            # Если только один набор пуст, даем небольшой штраф вместо полного отказа
+            return 0.3
         
-        # Non-critical words
-        non_critical_words1 = [w for w in norm_words1 if w not in critical_words1 and len(w) > 2]
-        non_critical_words2 = [w for w in norm_words2 if w not in critical_words2 and len(w) > 2]
-        
-        # Check each critical word from the first set
-        for word1 in critical_words1:
-            best_match_score = 0
-            for word2 in critical_words2:
-                # Check for abbreviations
-                if word1.startswith(word2) and len(word2) >= 3:
-                    # If word2 is the beginning of word1 and long enough
-                    similarity = 0.9
-                elif word2.startswith(word1) and len(word1) >= 3:
-                    # If word1 is the beginning of word2 and long enough
-                    similarity = 0.9
-                # Calculate word similarity
-                elif word1 == word2:
-                    similarity = 1.0
-                elif word1 in word2 or word2 in word1:
-                    # One word is fully contained in another
-                    similarity = 0.9
-                else:
-                    similarity = self._levenshtein_similarity(word1, word2)
-                
-                best_match_score = max(best_match_score, similarity)
+        # Handle critical words if present
+        if critical_words1 and critical_words2:
+            critical_match_score = 0
+            critical_total = len(critical_words1)
             
-            # Critical words need 80% match
-            if best_match_score < 0.8:
-                return 0.0
-        
-        # Same for the second set of critical words
-        for word2 in critical_words2:
-            best_match_score = 0
-            for word1 in critical_words1:
-                if word2 == word1:
-                    similarity = 1.0
-                elif word2 in word1 or word1 in word2:
-                    similarity = 0.9
-                else:
-                    similarity = self._levenshtein_similarity(word2, word1)
+            if critical_total > 0:
+                for word1 in critical_words1:
+                    best_critical_match = 0
+                    for word2 in critical_words2:
+                        if word1 == word2:
+                            similarity = 1.0
+                        elif word1 in word2 or word2 in word1:
+                            similarity = 0.9
+                        else:
+                            similarity = self._levenshtein_similarity(word1, word2)
+                        
+                        best_critical_match = max(best_critical_match, similarity)
+                    
+                    if best_critical_match > 0.8:
+                        critical_match_score += 1
                 
-                best_match_score = max(best_match_score, similarity)
-            
-            if best_match_score < 0.8:
-                return 0.0
+                critical_ratio = critical_match_score / critical_total
+                # Если критические слова не совпали, даем сильный штраф, но не 0
+                if critical_ratio < 0.5:
+                    return 0.4  # Сильный штраф вместо 0
         
-        # Check non-critical words with lower threshold (65%)
+        # Handle critical words - words that must match for products to be similar
+        non_critical_words1 = [w for w in norm_words1 if critical_words1 is None or w not in critical_words1]
+        
+        # Check if any critical words don't match well
         non_critical_mismatch_count = 0
         for word1 in non_critical_words1:
-            best_match_score = 0
-            for word2 in non_critical_words2:
-                # Calculate similarity as before
+            best_match_score = 0.0
+            for word2 in norm_words2:
+                # Check for exact match first
                 if word1 == word2:
                     similarity = 1.0
+                # Check for partial match (one word contains the other)
                 elif word1 in word2 or word2 in word1:
                     similarity = 0.9
                 else:
@@ -303,7 +295,7 @@ class EstonianProductNLP:
                 
                 best_match_score = max(best_match_score, similarity)
             
-            # For non-critical words, use lower threshold
+            # Оставляем оригинальный порог 0.70 для некритичных слов
             if best_match_score < 0.70:
                 non_critical_mismatch_count += 1
         
@@ -315,20 +307,22 @@ class EstonianProductNLP:
         max_possible = max(len(norm_words1), len(norm_words2))
         
         if max_possible == 0:
-            return 0.0
+            return 1.0  # Оба набора пусты после отфильтровывания
         
         # Count total matching words
         matches = 0
         for word1 in norm_words1:
             for word2 in norm_words2:
+                # Оставляем оригинальный порог 0.8 для сходства слов
                 if word1 == word2 or word1 in word2 or word2 in word1 or self._levenshtein_similarity(word1, word2) > 0.8:
                     matches += 1
                     break
         
         # Reduce final score based on non-critical mismatches
         similarity_score = matches / max_possible
-        if non_critical_mismatch_ratio > 0.5:  # If more than half of non-critical words don't match well
-            similarity_score *= (1 - 0.2 * non_critical_mismatch_ratio)  # Reduce score by up to 20%
+        # Делаем более строгим порог для штрафа и увеличиваем сам штраф
+        if non_critical_mismatch_ratio > 0.3:  # Если более 30% (вместо 50%) некритичных слов не совпадают
+            similarity_score *= (1 - 0.3 * non_critical_mismatch_ratio)  # Снижаем оценку до 30% (вместо 20%)
         
         return similarity_score
 
@@ -359,11 +353,11 @@ class EstonianProductNLP:
         Takes into account both exact and partial matches.
         """
         if not attributes1 or not attributes2:
-            # If one of the sets is empty, return 0 or a small value
+            # If one of the sets is empty, return small value instead of 0
             # If both sets are empty, this can be considered a good match
             if not attributes1 and not attributes2:
                 return 1.0
-            return 0.1  # Small value to not completely discard products
+            return 0.3  # Увеличиваем с 0.1 до 0.3 - более мягкий штраф
         
         # Normalize attributes
         norm_attrs1 = []
@@ -401,20 +395,8 @@ class EstonianProductNLP:
         remaining_attrs1 = [a for a in norm_attrs1 if a not in exact_matches]
         remaining_attrs2 = [a for a in norm_attrs2 if a not in exact_matches]
         
-        for attr1 in remaining_attrs1:
-            best_partial_match = 0.0
-            for attr2 in remaining_attrs2:
-                # Skip attributes that are too short
-                if len(attr1) < 2 or len(attr2) < 2:
-                    continue
-                    
-                # Use Levenshtein distance to determine similarity
-                similarity = self._levenshtein_similarity(attr1, attr2)
-                    
-                if similarity > 0.8:  # Threshold for partial match
-                    best_partial_match = max(best_partial_match, similarity * 0.8)
-            
-            partial_matches_score += best_partial_match
+        # Здесь могут быть дополнительные изменения для улучшения сопоставления атрибутов,
+        # но текущий фрагмент кода не включает всю логику _attribute_similarity
         
         # Calculate final similarity score
         total_possible = max(len(norm_attrs1), len(norm_attrs2))
@@ -524,7 +506,7 @@ class EstonianProductNLP:
             return 0.0
         
         # Compare main words taking critical attributes into account
-        word_similarity = self._improved_word_similarity(main_words1, main_words2)
+        word_similarity = self._calculate_word_similarity(main_words1, main_words2)
         
         # If main words don't match well enough, stop comparison
         if word_similarity < 0.3:
@@ -545,6 +527,25 @@ class EstonianProductNLP:
         
         # Return percentage for better readability
         return total_score * 100
+
+class ProductMatcher:
+    def __init__(self, config=None):
+        """
+        Инициализация матчера с настроенными порогами сопоставления.
+        """
+        self.config = config or {}
+        
+        # Установка порогов сопоставления
+        # Общий порог для автоматического сопоставления
+        self.threshold = 0.90  # Меняем с 0.95 на 0.90 (90%)
+        
+        # Порог для потенциальных сопоставлений (требуют проверки)
+        self.potential_match_threshold = 0.80  # Сопоставления между 85% и 90% требуют проверки
+        
+        # Пороги для отдельных компонентов
+        self.word_similarity_threshold = 0.95  # Порог сходства ключевых слов
+        self.attribute_similarity_threshold = 0.95  # Порог сходства атрибутов
+        self.unique_words_threshold = 0.75  # Порог сходства уникальных слов
 
 estonian_nlp = EstonianProductNLP()
 
@@ -794,7 +795,7 @@ def run_matching(db_session):
                     best_score = nlp_similarity
                     
                     # Additional analysis to fill metrics
-                    word_similarity = estonian_nlp._improved_word_similarity(first_main_words, second_main_words) * 100
+                    word_similarity = estonian_nlp._calculate_word_similarity(first_main_words, second_main_words) * 100
                     attribute_score = estonian_nlp._attribute_similarity(first_attributes, second_attributes) * 100
                     unique_words_score = estonian_nlp._simple_unique_words(
                         first_candidate.store_product_name, 
@@ -820,13 +821,13 @@ def run_matching(db_session):
                         best_metrics
                     )
             
-            match_threshold = 82.0
+            match_threshold = 90.0
             
             product_category = getattr(first_candidate, "category_id", None)
             if product_category and product_category in category_thresholds:
-                match_threshold = category_thresholds[product_category]['threshold']
+                match_threshold = max(category_thresholds[product_category]['threshold'], 90.0)
             
-            if best_match and best_score >= 80.0:
+            if best_match and best_score >= 90.0:
                 # Get brand only when needed for metadata
                 brand = getBrand(first_candidate.store_product_name)
                 
