@@ -290,126 +290,168 @@ class EstonianProductNLP:
     
     def _improved_word_similarity(self, words1, words2):
         """
-        Улучшенное сравнение наборов слов с учетом частичных совпадений
-        и нормализации слов.
+        Улучшенное сравнение наборов слов с учетом частичных совпадений,
+        нормализации слов и обязательного наличия всех критических слов.
         """
         if not words1 or not words2:
             return 0.0
 
-        # Нормализуем слова
-        norm_words1 = [normalize_string(w) for w in words1]
-        norm_words2 = [normalize_string(w) for w in words2]
+        # Нормализуем слова и обрабатываем сокращения
+        norm_words1 = []
+        for w in words1:
+            # Удаляем точку в конце, если она есть (для сокращений)
+            w = w.rstrip('.')
+            norm_words1.append(normalize_string(w))
         
-        # Находим точные совпадения
-        exact_matches = set(norm_words1) & set(norm_words2)
-        exact_match_count = len(exact_matches)
+        norm_words2 = []
+        for w in words2:
+            # Удаляем точку в конце, если она есть (для сокращений)
+            w = w.rstrip('.')
+            norm_words2.append(normalize_string(w))
         
-        # Ищем частичные совпадения для слов, которые не совпали точно
-        partial_matches_score = 0.0
-        remaining_words1 = [w for w in norm_words1 if w not in exact_matches]
-        remaining_words2 = [w for w in norm_words2 if w not in exact_matches]
+        # Находим критические слова (слова длиннее 3 символов, которые могут указывать на 
+        # характеристики продукта - вкусы, модели и т.д.)
+        critical_words1 = [w for w in norm_words1 if len(w) > 3 and not self._is_common_word(w)]
+        critical_words2 = [w for w in norm_words2 if len(w) > 3 and not self._is_common_word(w)]
         
-        for word1 in remaining_words1:
-            best_partial_match = 0.0
-            for word2 in remaining_words2:
-                # Пропускаем слишком короткие слова для частичного сравнения
-                if len(word1) < 3 or len(word2) < 3:
-                    continue
-                    
-                # Используем расстояние Левенштейна для определения похожести
-                similarity = self._levenshtein_similarity(word1, word2)
-                if similarity > 0.8:  # Порог для частичного совпадения
-                    best_partial_match = max(best_partial_match, similarity * 0.8)  # Частичное совпадение весит меньше
+        # Проверяем каждое критическое слово из первого набора
+        for word1 in critical_words1:
+            best_match_score = 0
+            for word2 in critical_words2:
+                # Проверка на сокращения
+                if word1.startswith(word2) and len(word2) >= 3:
+                    # Если слово2 является началом слова1 и достаточно длинное
+                    similarity = 0.9
+                elif word2.startswith(word1) and len(word1) >= 3:
+                    # Если слово1 является началом слова2 и достаточно длинное
+                    similarity = 0.9
+                # Рассчитаем сходство слов
+                elif word1 == word2:
+                    similarity = 1.0
+                elif word1 in word2 or word2 in word1:
+                    # Одно слово содержится в другом полностью
+                    similarity = 0.9
+                else:
+                    similarity = self._levenshtein_similarity(word1, word2)
+                
+                best_match_score = max(best_match_score, similarity)
             
-            partial_matches_score += best_partial_match
+            # Если для важного слова нет достаточно близкого соответствия (< 80%), 
+            # считаем продукты разными
+            if best_match_score < 0.8:
+                return 0.0
         
-        # Вычисляем итоговую оценку сходства
-        total_possible = max(len(norm_words1), len(norm_words2))
-        if total_possible == 0:
+        # То же самое для второго набора слов
+        for word2 in critical_words2:
+            best_match_score = 0
+            for word1 in critical_words1:
+                if word2 == word1:
+                    similarity = 1.0
+                elif word2 in word1 or word1 in word2:
+                    similarity = 0.9
+                else:
+                    similarity = self._levenshtein_similarity(word2, word1)
+                
+                best_match_score = max(best_match_score, similarity)
+            
+            if best_match_score < 0.8:
+                return 0.0
+        
+        # Если все критические слова имеют соответствия, рассчитываем общую схожесть
+        total_similarity = 0.0
+        max_possible = max(len(norm_words1), len(norm_words2))
+        
+        if max_possible == 0:
             return 0.0
         
-        # Комбинируем точные и частичные совпадения
-        similarity_score = (exact_match_count + partial_matches_score) / total_possible
+        # Считаем общее количество совпадающих слов
+        matches = 0
+        for word1 in norm_words1:
+            for word2 in norm_words2:
+                if word1 == word2 or word1 in word2 or word2 in word1 or self._levenshtein_similarity(word1, word2) > 0.8:
+                    matches += 1
+                    break
         
-        return similarity_score
+        return matches / max_possible
 
-    def _simple_unique_words(self, text1, text2):
-        """
-        Простое сравнение уникальных слов в двух текстах.
-        Использует коэффициент Жаккара.
-        """
-        if not text1 or not text2:
-            return 0.0
+    def _is_common_word(self, word):
+        """Проверяет, является ли слово общим словом"""
+        # Нормализуем слово перед проверкой
+        word = normalize_string(word.lower())
         
-        # Нормализуем и токенизируем тексты
-        words1 = set(self._tokenize(normalize_string(text1)))
-        words2 = set(self._tokenize(normalize_string(text2)))
-        
-        # Вычисляем коэффициент Жаккара: пересечение / объединение
-        if not words1 or not words2:
-            return 0.0
-        
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-        
-        if union == 0:
-            return 0.0
-        
-        return intersection / union
+        return (word in self.common_words or 
+                word in self.dynamic_common_words and 
+                self.dynamic_common_words[word] >= self.common_words_threshold)
 
-    def _levenshtein_similarity(self, s1, s2):
-        """
-        Вычисляет сходство двух строк на основе расстояния Левенштейна.
-        Возвращает значение от 0 до 1, где 1 - полное совпадение.
-        """
-        # Если строки идентичны, возвращаем 1.0
-        if s1 == s2:
-            return 1.0
+    def _extract_taste_and_model(self, text):
+        """Извлекает информацию о вкусе или модели продукта"""
+        if not text:
+            return None
         
-        # Если одна из строк пустая, возвращаем 0.0
-        if not s1 or not s2:
-            return 0.0
+        # Искать информацию о вкусе
+        for marker in self.taste_markers:
+            if marker in text.lower():
+                idx = text.lower().find(marker)
+                if idx >= 0:
+                    after_marker = text[idx + len(marker):].strip()
+                    before_marker = text[:idx].strip()
+                    
+                    # Проверяем слова после маркера
+                    taste_words = [w for w in after_marker.split()[:2] 
+                                  if w and len(w) > 2 and not self._is_common_word(w)]
+                    if taste_words:
+                        return ' '.join(taste_words)
+                    
+                    # Проверяем слова перед маркером
+                    taste_words = [w for w in before_marker.split()[-2:] 
+                                  if w and len(w) > 2 and not self._is_common_word(w)]
+                    if taste_words:
+                        return ' '.join(taste_words)
         
-        # Быстрая проверка: если длины строк сильно отличаются, то строки не похожи
-        len_diff = abs(len(s1) - len(s2))
-        if len_diff > min(len(s1), len(s2)) * 0.5:
-            return 0.0
+        # Искать модели и коды продуктов
+        model_patterns = [
+            r'[A-Z0-9]{2,}-[A-Z0-9]{2,}', # Формат XX-XX
+            r'[A-Z]{2,}\d{2,}',           # Формат XXnn
+            r'\d{3,}[A-Z]+',              # Формат nnnX
+            r'[A-Z]{1,2}\d{1,2}'          # Формат Xn
+        ]
         
-        # Инициализация матрицы
-        m, n = len(s1), len(s2)
-        d = [[0 for _ in range(n+1)] for _ in range(m+1)]
+        for pattern in model_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                return matches[0]
         
-        # Заполнение первой строки и столбца
-        for i in range(m+1):
-            d[i][0] = i
-        for j in range(n+1):
-            d[0][j] = j
-        
-        # Вычисление остальных элементов матрицы
-        for i in range(1, m+1):
-            for j in range(1, n+1):
-                cost = 0 if s1[i-1] == s2[j-1] else 1
-                d[i][j] = min(
-                    d[i-1][j] + 1,      # удаление
-                    d[i][j-1] + 1,      # вставка
-                    d[i-1][j-1] + cost  # замена или совпадение
-                )
-        
-        # Вычисляем сходство как 1 - нормализованное расстояние
-        max_len = max(m, n)
-        if max_len == 0:
-            return 1.0
-        
-        similarity = 1.0 - (d[m][n] / max_len)
-        return similarity
+        return None
 
     def compare_products(self, product1, product2):
-        """Сравнивает два продукта с упрощенной логикой"""
+        """Сравнивает два продукта с улучшенной логикой обработки критических различий"""
         brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(product1)
         brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(product2)
         
-        # Сравниваем основные слова
+        # Извлекаем вкусы и модели, которые критичны для сравнения
+        taste_model1 = self._extract_taste_and_model(product1)
+        taste_model2 = self._extract_taste_and_model(product2)
+        
+        # Если у обоих продуктов есть вкус/модель, но они разные - продукты разные
+        if taste_model1 and taste_model2 and taste_model1 != taste_model2:
+            # Проверяем частичное совпадение для учета разных форматов записи
+            if self._levenshtein_similarity(taste_model1, taste_model2) < 0.7:
+                return 0.0
+        
+        # Проверка веса/объема продукта, если в названии есть цифры с единицами измерения
+        weight_pattern = r'(\d+[.,]?\d*)\s*(г|g|кг|kg|л|l|мл|ml)'
+        weight1 = re.findall(weight_pattern, product1.lower().replace(',', '.'))
+        weight2 = re.findall(weight_pattern, product2.lower().replace(',', '.'))
+        
+        if weight1 and weight2 and weight1[0][0] != weight2[0][0]:
+            return 0.0
+        
+        # Сравниваем основные слова с учетом критических атрибутов
         word_similarity = self._improved_word_similarity(main_words1, main_words2)
+        
+        # Если основные слова не совпадают достаточно хорошо, прекращаем сравнение
+        if word_similarity < 0.3:
+            return 0.0
         
         # Сравниваем атрибуты
         attribute_score = self._attribute_similarity(attributes1, attributes2)
@@ -419,9 +461,9 @@ class EstonianProductNLP:
         
         # Обновленное распределение весов
         total_score = (
-            word_similarity * 0.6 + 
-            attribute_score * 0.3 + 
-            unique_words_score * 0.1
+            word_similarity * 0.4 + 
+            attribute_score * 0.4 + 
+            unique_words_score * 0.2
         )
         
         # Возвращаем процентное значение для лучшей читаемости
@@ -738,6 +780,92 @@ class EstonianProductNLP:
         similarity_score = (exact_match_count + partial_matches_score) / total_possible
         
         return similarity_score
+
+    def _levenshtein_similarity(self, str1, str2):
+        """
+        Вычисляет меру сходства на основе расстояния Левенштейна.
+        Возвращает значение от 0 до 1, где 1 - полное совпадение.
+        """
+        if not str1 or not str2:
+            return 0.0
+        
+        # Нормализуем строки перед сравнением
+        str1 = normalize_string(str1.lower())
+        str2 = normalize_string(str2.lower())
+        
+        # Если строки идентичны, сразу возвращаем 1
+        if str1 == str2:
+            return 1.0
+        
+        # Создаем матрицу размером (len(str1)+1) x (len(str2)+1)
+        matrix = [[0 for _ in range(len(str2) + 1)] for _ in range(len(str1) + 1)]
+        
+        # Инициализируем первую строку и первый столбец
+        for i in range(len(str1) + 1):
+            matrix[i][0] = i
+        for j in range(len(str2) + 1):
+            matrix[0][j] = j
+        
+        # Заполняем матрицу
+        for i in range(1, len(str1) + 1):
+            for j in range(1, len(str2) + 1):
+                cost = 0 if str1[i-1] == str2[j-1] else 1
+                matrix[i][j] = min(
+                    matrix[i-1][j] + 1,      # Удаление
+                    matrix[i][j-1] + 1,      # Вставка
+                    matrix[i-1][j-1] + cost  # Замена или совпадение
+                )
+        
+        # Получаем расстояние Левенштейна
+        distance = matrix[len(str1)][len(str2)]
+        
+        # Вычисляем сходство как 1 - (расстояние / длина_более_длинной_строки)
+        max_length = max(len(str1), len(str2))
+        similarity = 1.0 - (distance / max_length if max_length > 0 else 0)
+        
+        return similarity
+
+    def _simple_unique_words(self, product1, product2):
+        """
+        Сравнивает уникальные слова в названиях продуктов.
+        Игнорирует общие слова и сосредотачивается на специфичных словах.
+        """
+        if not product1 or not product2:
+            return 0.0
+        
+        # Нормализуем и разбиваем на слова
+        words1 = [w.rstrip('.') for w in normalize_string(product1.lower()).split()]
+        words2 = [w.rstrip('.') for w in normalize_string(product2.lower()).split()]
+        
+        # Отфильтровываем общие слова и слишком короткие слова
+        unique_words1 = [w for w in words1 if len(w) > 3 and not self._is_common_word(w)]
+        unique_words2 = [w for w in words2 if len(w) > 3 and not self._is_common_word(w)]
+        
+        # Если нет уникальных слов, считаем продукты похожими
+        if not unique_words1 and not unique_words2:
+            return 1.0
+        elif not unique_words1 or not unique_words2:
+            return 0.0
+        
+        # Находим совпадающие уникальные слова
+        matches = 0
+        for word1 in unique_words1:
+            for word2 in unique_words2:
+                # Нормализуем перед сравнением
+                norm_word1 = normalize_string(word1)
+                norm_word2 = normalize_string(word2)
+                
+                # Проверяем или точное совпадение, или содержание одного слова в другом
+                if norm_word1 == norm_word2 or (len(norm_word1) > 4 and norm_word1 in norm_word2) or (len(norm_word2) > 4 and norm_word2 in norm_word1):
+                    matches += 1
+                    break
+        
+        # Вычисляем показатель совпадения
+        max_unique = max(len(unique_words1), len(unique_words2))
+        if max_unique > 0:
+            return matches / max_unique
+        
+        return 0.5  # Возвращаем среднее значение, если нет уникальных слов
 
 estonian_nlp = EstonianProductNLP()
 
