@@ -15,6 +15,8 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl import load_workbook
 import io
+import csv
+import pandas as pd
 
 logger = setup_logger("app.ai.matcher")
 
@@ -33,6 +35,8 @@ def normalize_string(text):
 
 class EstonianProductNLP:
     def __init__(self):
+        """Инициализируем класс с дополнительными атрибутами"""
+        # Базовая инициализация
         self.common_words = set()
         self.taste_markers = []
         self.units_cache = {}
@@ -41,6 +45,25 @@ class EstonianProductNLP:
         self.min_word_length = 2
         self.dynamic_taste_markers = {}
         self.dynamic_taste_words = {}
+        
+        # Регулярное выражение для весов
+        self.weight_pattern = r'\b\d+x\d+[a-z]*\b|\b\d+[a-z]*\b'
+        
+        # Динамические словари и другие атрибуты
+        self.brand_candidates = set()
+        self.dynamic_brands = {}
+        self.probable_tastes = []
+        self.taste_indicators = []
+        self.probable_units = []
+        self.product_samples = []
+        self.product_type_indicators = set()
+        
+        # Коэффициенты для сравнения
+        self.comparison_weights = {
+            'word': 0.6,
+            'attribute': 0.3,
+            'unique': 0.1
+        }
         
     def initialize_from_data(self, db_session):
         """Initializes all dynamic lists from database data"""
@@ -141,44 +164,65 @@ class EstonianProductNLP:
         logger.info(f"Updated common words list. Total words: {len(self.common_words)}")
         
     def extract_features(self, text):
+        """Извлекает характеристики из текста продукта"""
         if not text:
             return None, [], None, [], []
             
-        text = normalize_string(text)
-        brand = getBrand(text)
-        if brand:
-            brand = normalize_brand(brand)
+        normalized_text = normalize_string(text)
         
-        main_part = text
+        # Получение бренда (оставляем для совместимости, но не используем)
+        brand = None
         
-        bracket_pattern = re.compile(r'\(([^)]*)\)')
-        bracket_matches = bracket_pattern.findall(text)
+        # Разделяем текст на токены
+        tokens = self._tokenize(normalized_text)
+        
+        # Извлекаем атрибуты (слова в скобках, после запятых и т.д.)
         attributes = []
+        
+        # Ищем слова в скобках
+        bracket_pattern = re.compile(r'\((.*?)\)')
+        bracket_matches = bracket_pattern.findall(normalized_text)
         for match in bracket_matches:
-            attributes.extend(self._tokenize(match))
-            main_part = bracket_pattern.sub('', main_part)
+            # Добавляем строковые значения, а не кортежи
+            attributes.extend([token for token in self._tokenize(match)])
+            normalized_text = bracket_pattern.sub('', normalized_text)
         
-        comma_parts = main_part.split(',')
+        # Ищем части после запятой
+        comma_parts = normalized_text.split(',')
         if len(comma_parts) > 1:
-            main_part = comma_parts[0]
+            normalized_text = comma_parts[0]
             for part in comma_parts[1:]:
-                attributes.extend(self._tokenize(part))
+                # Убедимся, что добавляем строки
+                attributes.extend([token for token in self._tokenize(part)])
         
-        main_tokens = self._tokenize(main_part)
+        # Определяем шаблон для весов напрямую, не используя self.weight_pattern
+        weight_pattern = r'\b\d+x\d+[a-z]*\b|\b\d+[a-z]*\b'
         
-        product_type_indicators = self._extract_type_indicators(text, main_tokens)
+        # Ищем веса и единицы измерения
+        weight_matches = re.findall(weight_pattern, normalized_text)
+        for match in weight_matches:
+            if match and match not in attributes:
+                attributes.append(match)
         
-        main_words = []
-        for token in main_tokens:
-            if token not in self.common_words and (not brand or token not in brand.lower()):
-                if self._is_attribute(token) or self._could_be_important_attribute(token, text):
-                    attributes.append(token)
-                else:
-                    main_words.append(token)
+        # Заглушка для вкуса (оставляем для совместимости, но не используем)
+        taste = None
         
-        taste = self._extract_taste(text, main_tokens)
+        # Получаем основные слова
+        main_words = self._tokenize(normalized_text)
         
-        return brand, main_words, taste, attributes, product_type_indicators
+        # Определяем индикаторы типа продукта
+        type_indicators = []
+        # Проверяем, что атрибут существует и не пустой
+        if hasattr(self, 'product_type_indicators') and self.product_type_indicators:
+            for word in main_words:
+                if word in self.product_type_indicators:
+                    type_indicators.append(word)
+        
+        # Удаляем дубликаты и убеждаемся, что все элементы являются строками
+        main_words = [str(word) for word in list(set(main_words))]
+        attributes = [str(attr) for attr in list(set(attributes))]
+        
+        return brand, main_words, taste, attributes, type_indicators
     
     def _extract_type_indicators(self, text, tokens):
         """Extracts key words that characterize product type"""
@@ -244,121 +288,145 @@ class EstonianProductNLP:
         tokens.sort()  # Sort tokens
         return tokens
     
-    def compare_products(self, product1, product2):
-        """Compares two products based on extracted features"""
-        normalized_product1 = normalize_string(product1) if product1 else None
-        normalized_product2 = normalize_string(product2) if product2 else None
-        
-        brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(normalized_product1)
-        brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(normalized_product2)
-        
-        if brand1 and brand2:
-            brand1 = normalize_brand(brand1)
-            brand2 = normalize_brand(brand2)
-        
-        if brand1 != brand2:
+    def _improved_word_similarity(self, words1, words2):
+        """
+        Улучшенное сравнение наборов слов с учетом частичных совпадений
+        и нормализации слов.
+        """
+        if not words1 or not words2:
             return 0.0
-            
-        unique_words_score = self._compare_unique_words(normalized_product1, normalized_product2)
-        if unique_words_score < 0.3:
-            return 0.0
-        
-        word_similarity = self._calculate_word_similarity(main_words1, main_words2)
-        
-        taste_score = 0.0
-        if taste1 and taste2:
-            if taste1 == taste2:
-                taste_score = 1.0
-            else:
-                taste_similarity = self._levenshtein_similarity(taste1, taste2)
-                taste_score = taste_similarity if taste_similarity > 0.7 else 0.0
-        elif not taste1 and not taste2:
-            taste_score = 0.7
-        else:
-            taste_score = 0.0
-        
-        attribute_score = 0.0
-        if attributes1 and attributes2:
-            attribute_score = self._calculate_attribute_similarity(attributes1, attributes2)
-        elif not attributes1 and not attributes2:
-            attribute_score = 1.0
-        else:
-            attribute_score = 0.1
-        
-        # Динамические веса в зависимости от наличия данных
-        weights = {
-            'word_similarity': 0.2,
-            'attribute_score': 0.3,
-            'taste_score': 0.2,
-            'unique_words': 0.3
-        }
 
-        # Корректировка весов если нет вкуса
-        if not taste1 and not taste2:
-            weights['word_similarity'] += weights['taste_score'] * 0.5
-            weights['attribute_score'] += weights['taste_score'] * 0.3
-            weights['unique_words'] += weights['taste_score'] * 0.2
-            weights['taste_score'] = 0
-
-        # Корректировка весов если нет атрибутов
-        if not attributes1 and not attributes2:
-            weights['word_similarity'] += weights['attribute_score'] * 0.6
-            weights['unique_words'] += weights['attribute_score'] * 0.4
-            weights['attribute_score'] = 0
-
-        # Если есть только основные слова
-        if not (taste1 or taste2) and not (attributes1 or attributes2):
-            weights['word_similarity'] = 0.6
-            weights['unique_words'] = 0.4
-            weights['taste_score'] = 0
-            weights['attribute_score'] = 0
-
-        return (
-            word_similarity * weights['word_similarity'] +
-            attribute_score * weights['attribute_score'] +
-            taste_score * weights['taste_score'] +
-            unique_words_score * weights['unique_words']
-        )
-    
-    def _compare_unique_words(self, product1, product2):
-        """Compares rare and unique words in product names"""
-        tokens1 = self._tokenize(product1)
-        tokens2 = self._tokenize(product2)
+        # Нормализуем слова
+        norm_words1 = [normalize_string(w) for w in words1]
+        norm_words2 = [normalize_string(w) for w in words2]
         
-        rare_words1 = []
-        rare_words2 = []
+        # Находим точные совпадения
+        exact_matches = set(norm_words1) & set(norm_words2)
+        exact_match_count = len(exact_matches)
         
-        for token in tokens1:
-            if len(token) > 5:
-                if token in self.dynamic_common_words and self.dynamic_common_words[token] < 0.1:
-                    rare_words1.append(token)
-                elif token not in self.dynamic_common_words:
-                    rare_words1.append(token)
+        # Ищем частичные совпадения для слов, которые не совпали точно
+        partial_matches_score = 0.0
+        remaining_words1 = [w for w in norm_words1 if w not in exact_matches]
+        remaining_words2 = [w for w in norm_words2 if w not in exact_matches]
         
-        for token in tokens2:
-            if len(token) > 5:
-                if token in self.dynamic_common_words and self.dynamic_common_words[token] < 0.1:
-                    rare_words2.append(token)
-                elif token not in self.dynamic_common_words:
-                    rare_words2.append(token)
-        
-        if not rare_words1 or not rare_words2:
-            return 0.5
-        
-        best_matches = 0
-        total_pairs = max(len(rare_words1), len(rare_words2))
-        
-        for word1 in rare_words1:
-            max_similarity = 0
-            for word2 in rare_words2:
+        for word1 in remaining_words1:
+            best_partial_match = 0.0
+            for word2 in remaining_words2:
+                # Пропускаем слишком короткие слова для частичного сравнения
+                if len(word1) < 3 or len(word2) < 3:
+                    continue
+                    
+                # Используем расстояние Левенштейна для определения похожести
                 similarity = self._levenshtein_similarity(word1, word2)
-                max_similarity = max(max_similarity, similarity)
+                if similarity > 0.8:  # Порог для частичного совпадения
+                    best_partial_match = max(best_partial_match, similarity * 0.8)  # Частичное совпадение весит меньше
             
-            if max_similarity > 0.7:
-                best_matches += 1
+            partial_matches_score += best_partial_match
         
-        return best_matches / total_pairs if total_pairs > 0 else 0.5
-    
+        # Вычисляем итоговую оценку сходства
+        total_possible = max(len(norm_words1), len(norm_words2))
+        if total_possible == 0:
+            return 0.0
+        
+        # Комбинируем точные и частичные совпадения
+        similarity_score = (exact_match_count + partial_matches_score) / total_possible
+        
+        return similarity_score
+
+    def _simple_unique_words(self, text1, text2):
+        """
+        Простое сравнение уникальных слов в двух текстах.
+        Использует коэффициент Жаккара.
+        """
+        if not text1 or not text2:
+            return 0.0
+        
+        # Нормализуем и токенизируем тексты
+        words1 = set(self._tokenize(normalize_string(text1)))
+        words2 = set(self._tokenize(normalize_string(text2)))
+        
+        # Вычисляем коэффициент Жаккара: пересечение / объединение
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        if union == 0:
+            return 0.0
+        
+        return intersection / union
+
+    def _levenshtein_similarity(self, s1, s2):
+        """
+        Вычисляет сходство двух строк на основе расстояния Левенштейна.
+        Возвращает значение от 0 до 1, где 1 - полное совпадение.
+        """
+        # Если строки идентичны, возвращаем 1.0
+        if s1 == s2:
+            return 1.0
+        
+        # Если одна из строк пустая, возвращаем 0.0
+        if not s1 or not s2:
+            return 0.0
+        
+        # Быстрая проверка: если длины строк сильно отличаются, то строки не похожи
+        len_diff = abs(len(s1) - len(s2))
+        if len_diff > min(len(s1), len(s2)) * 0.5:
+            return 0.0
+        
+        # Инициализация матрицы
+        m, n = len(s1), len(s2)
+        d = [[0 for _ in range(n+1)] for _ in range(m+1)]
+        
+        # Заполнение первой строки и столбца
+        for i in range(m+1):
+            d[i][0] = i
+        for j in range(n+1):
+            d[0][j] = j
+        
+        # Вычисление остальных элементов матрицы
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                cost = 0 if s1[i-1] == s2[j-1] else 1
+                d[i][j] = min(
+                    d[i-1][j] + 1,      # удаление
+                    d[i][j-1] + 1,      # вставка
+                    d[i-1][j-1] + cost  # замена или совпадение
+                )
+        
+        # Вычисляем сходство как 1 - нормализованное расстояние
+        max_len = max(m, n)
+        if max_len == 0:
+            return 1.0
+        
+        similarity = 1.0 - (d[m][n] / max_len)
+        return similarity
+
+    def compare_products(self, product1, product2):
+        """Сравнивает два продукта с упрощенной логикой"""
+        brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(product1)
+        brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(product2)
+        
+        # Сравниваем основные слова
+        word_similarity = self._improved_word_similarity(main_words1, main_words2)
+        
+        # Сравниваем атрибуты
+        attribute_score = self._attribute_similarity(attributes1, attributes2)
+        
+        # Сравниваем уникальные слова
+        unique_words_score = self._simple_unique_words(product1, product2)
+        
+        # Обновленное распределение весов
+        total_score = (
+            word_similarity * 0.6 + 
+            attribute_score * 0.3 + 
+            unique_words_score * 0.1
+        )
+        
+        # Возвращаем процентное значение для лучшей читаемости
+        return total_score * 100
+
     def _calculate_attribute_similarity(self, attributes1, attributes2):
         """Improved attribute comparison considering their importance"""
         if not attributes1 or not attributes2:
@@ -391,7 +459,7 @@ class EstonianProductNLP:
             total_weight += weight
         
         return weighted_matches / total_weight if total_weight > 0 else 0.0
-    
+
     def _calculate_word_similarity(self, words1, words2):
         if not words1 or not words2:
             return 0.0
@@ -451,41 +519,6 @@ class EstonianProductNLP:
         union = len(set1.union(set2))
         
         return intersection / union if union > 0 else 0.0
-    
-    def _levenshtein_similarity(self, str1, str2):
-        """Calculates normalized similarity based on Levenshtein distance"""
-        if not str1 or not str2:
-            return 0.0
-            
-        distance = self._levenshtein_distance(str1, str2)
-        
-        max_len = max(len(str1), len(str2))
-        if max_len == 0:
-            return 1.0
-            
-        return 1.0 - (distance / max_len)
-    
-    def _levenshtein_distance(self, str1, str2):
-        """Calculates Levenshtein distance between two strings"""
-        m, n = len(str1), len(str2)
-        
-        dp = [[0 for _ in range(n+1)] for _ in range(m+1)]
-        
-        for i in range(m+1):
-            dp[i][0] = i
-        for j in range(n+1):
-            dp[0][j] = j
-            
-        for i in range(1, m+1):
-            for j in range(1, n+1):
-                cost = 0 if str1[i-1] == str2[j-1] else 1
-                dp[i][j] = min(
-                    dp[i-1][j] + 1,
-                    dp[i][j-1] + 1,
-                    dp[i-1][j-1] + cost
-                )
-                
-        return dp[m][n]
     
     def extract_package_multiplier(self, text):
         """Extracts package multiplier (e.g., 6x from '6X330ml')"""
@@ -626,74 +659,130 @@ class EstonianProductNLP:
         """Checks for digits in text"""
         return any(char.isdigit() for char in text)
 
+    def _attribute_similarity(self, attributes1, attributes2):
+        """
+        Вычисляет сходство двух наборов атрибутов.
+        Учитывает как точные, так и частичные совпадения.
+        """
+        if not attributes1 or not attributes2:
+            # Если один из наборов пустой, возвращаем 0 или небольшое значение
+            # Если оба набора пустые, это можно считать хорошим совпадением
+            if not attributes1 and not attributes2:
+                return 1.0
+            return 0.1  # Небольшое значение, чтобы не отбрасывать продукты полностью
+        
+        # Нормализуем атрибуты
+        norm_attrs1 = []
+        for attr in attributes1:
+            try:
+                # Преобразуем в строку, если это не строка
+                if not isinstance(attr, str):
+                    attr = str(attr)
+                norm_attrs1.append(normalize_string(attr))
+            except:
+                continue
+            
+        norm_attrs2 = []
+        for attr in attributes2:
+            try:
+                # Преобразуем в строку, если это не строка
+                if not isinstance(attr, str):
+                    attr = str(attr)
+                norm_attrs2.append(normalize_string(attr))
+            except:
+                continue
+        
+        # Если после нормализации наборы пустые
+        if not norm_attrs1 or not norm_attrs2:
+            if not norm_attrs1 and not norm_attrs2:
+                return 1.0
+            return 0.1
+        
+        # Находим точные совпадения
+        exact_matches = set(norm_attrs1) & set(norm_attrs2)
+        exact_match_count = len(exact_matches)
+        
+        # Ищем частичные совпадения для атрибутов, которые не совпали точно
+        partial_matches_score = 0.0
+        remaining_attrs1 = [a for a in norm_attrs1 if a not in exact_matches]
+        remaining_attrs2 = [a for a in norm_attrs2 if a not in exact_matches]
+        
+        for attr1 in remaining_attrs1:
+            best_partial_match = 0.0
+            for attr2 in remaining_attrs2:
+                # Пропускаем слишком короткие атрибуты
+                if len(attr1) < 2 or len(attr2) < 2:
+                    continue
+                    
+                # Используем расстояние Левенштейна для определения похожести
+                if hasattr(self, '_levenshtein_similarity'):
+                    similarity = self._levenshtein_similarity(attr1, attr2)
+                else:
+                    # Простое сравнение, если метод _levenshtein_similarity не доступен
+                    if attr1 == attr2:
+                        similarity = 1.0
+                    else:
+                        similarity = 0.0
+                    
+                if similarity > 0.8:  # Порог для частичного совпадения
+                    best_partial_match = max(best_partial_match, similarity * 0.8)
+            
+            partial_matches_score += best_partial_match
+        
+        # Вычисляем итоговую оценку сходства
+        total_possible = max(len(norm_attrs1), len(norm_attrs2))
+        if total_possible == 0:
+            return 1.0  # Оба набора пустые после фильтрации
+        
+        # Комбинируем точные и частичные совпадения
+        similarity_score = (exact_match_count + partial_matches_score) / total_possible
+        
+        return similarity_score
+
 estonian_nlp = EstonianProductNLP()
 
-# Function to save potential matches to Excel file
-def save_potential_matches_to_file(first_product, second_product, score, detailed_info=None):
+# Функция сохранения совпадений в файл Excel
+def save_potential_matches_to_file(first_product, second_product, score, metrics):
+    """Сохраняет информацию о потенциальных совпадениях в Excel файл"""
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d")
-        filename = f"potential_matches_{timestamp}.xlsx"
+        filepath = "potential_matches.xlsx"
+        file_exists = os.path.isfile(filepath)
         
-        # Create a new workbook if file doesn't exist
-        if not os.path.isfile(filename):
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Potential Matches"
-            headers = ['First Product', 'Second Product', 'Score', 'Word Similarity', 'Attribute Score', 'Taste Score', 
-                      'Unique Words Score', 'Weight Similarity', 'First Brand', 'Second Brand', 'First Main Words', 
-                      'Second Main Words', 'First Taste', 'Second Taste', 'First Attributes', 'Second Attributes', 'Timestamp']
-            for col_num, header in enumerate(headers, 1):
-                col_letter = get_column_letter(col_num)
-                ws[f'{col_letter}1'] = header
-                ws.column_dimensions[col_letter].width = 40  # Set column width
-        else:
-            # Load existing workbook
-            wb = load_workbook(filename)
-            ws = wb["Potential Matches"]
+        # Создаем данные для записи
+        data = {
+            'First Product': [first_product],
+            'Second Product': [second_product],
+            'Score': [f"{score:.1f}%"],
+            'Word Similarity': [f"{metrics.get('word_similarity', 0):.1f}%"],
+            'Attribute Score': [f"{metrics.get('attribute_score', 0):.1f}%"],
+            'Unique Words Score': [f"{metrics.get('unique_words_score', 0):.1f}%"],
+            'First Main Words': [str(metrics.get('first_main_words', []))],
+            'Second Main Words': [str(metrics.get('second_main_words', []))],
+            'First Attributes': [str(metrics.get('first_attributes', []))],
+            'Second Attributes': [str(metrics.get('second_attributes', []))],
+            'Timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        }
         
-        # Add new row
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Создаем DataFrame из данных
+        df = pd.DataFrame(data)
         
-        # Initialize with basic info
-        row = [first_product, second_product, f"{score:.1f}%", "", "", "", "", "", "", "", "", "", "", "", "", "", current_time]
+        # Если файл существует, загружаем его и добавляем новые данные
+        if file_exists:
+            try:
+                existing_df = pd.read_excel(filepath)
+                # Объединяем существующие данные с новыми
+                df = pd.concat([existing_df, df], ignore_index=True)
+            except Exception as e:
+                logger.error(f"Ошибка при чтении существующего файла Excel: {str(e)}")
+                # Если не удалось прочитать существующий файл, создаем новый
         
-        # Add detailed metrics if available
-        if detailed_info:
-            row[3] = f"{detailed_info.get('word_similarity', 0) * 100:.1f}%"  # Word Similarity
-            row[4] = f"{detailed_info.get('attribute_score', 0) * 100:.1f}%"  # Attribute Score
-            row[5] = f"{detailed_info.get('taste_score', 0) * 100:.1f}%"      # Taste Score
-            row[6] = f"{detailed_info.get('unique_words_score', 0) * 100:.1f}%" # Unique Words Score
-            row[7] = f"{detailed_info.get('weight_similarity', 0) * 100:.1f}%" # Weight Similarity
-            row[8] = detailed_info.get('first_brand', '')    # First Brand
-            row[9] = detailed_info.get('second_brand', '')   # Second Brand
-            row[10] = str(detailed_info.get('first_main_words', []))  # First Main Words
-            row[11] = str(detailed_info.get('second_main_words', [])) # Second Main Words
-            row[12] = detailed_info.get('first_taste', '')   # First Taste
-            row[13] = detailed_info.get('second_taste', '')  # Second Taste
-            row[14] = str(detailed_info.get('first_attributes', [])) # First Attributes
-            row[15] = str(detailed_info.get('second_attributes', [])) # Second Attributes
-            
-        ws.append(row)
+        # Сохраняем DataFrame в Excel файл
+        df.to_excel(filepath, index=False, engine='openpyxl')
         
-        # Auto-adjust columns width for better readability
-        for column in ws.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
-            for cell in column:
-                if cell.value:
-                    cell_length = len(str(cell.value))
-                    if cell_length > max_length:
-                        max_length = cell_length
-            adjusted_width = max_length + 2
-            ws.column_dimensions[column_letter].width = adjusted_width if adjusted_width > 15 else 15
+        logger.info(f"Данные о совпадении успешно сохранены в {filepath}")
         
-        # Save the file
-        wb.save(filename)
-            
-        return True
     except Exception as e:
-        logger.error(f"Error saving potential match to file: {str(e)}")
-        return False
+        logger.error(f"Ошибка сохранения совпадений в Excel файл: {str(e)}")
 
 def run_matching(db_session):
     """Run matching based on weight and title similarity with Estonian NLP"""
@@ -719,19 +808,22 @@ def run_matching(db_session):
                 ean_match = ean_matches[0]
                 
                 if ean_match.product_id is not None:
-                    first_candidate.product_id = ean_match.product_id
-                    first_candidate.last_matched = func.now()
-                    ean_matched_count += 1
-                    db_session.commit()
-                    logger.info(f"EAN match found: {first_candidate.store_product_name} → {ean_match.store_product_name} (EAN: {first_candidate.ean})")
-                    
-                    product = db_session.query(schemas.Product).filter(
+                    # Проверяем, что этот product_id еще не использован для другого товара
+                    existing_product = db_session.query(schemas.Product).filter(
                         schemas.Product.product_id == ean_match.product_id
                     ).first()
-                    if product and not product.barcode:
-                        product.barcode = first_candidate.ean
+                    
+                    if existing_product:
+                        first_candidate.product_id = ean_match.product_id
+                        first_candidate.last_matched = func.now()
+                        ean_matched_count += 1
                         db_session.commit()
-                        logger.info(f"Updated product barcode: {product.product_id} → {first_candidate.ean}")
+                        logger.info(f"EAN match found: {first_candidate.store_product_name} → {ean_match.store_product_name} (EAN: {first_candidate.ean})")
+                        
+                        if not existing_product.barcode:
+                            existing_product.barcode = first_candidate.ean
+                            db_session.commit()
+                            logger.info(f"Updated product barcode: {existing_product.product_id} → {first_candidate.ean}")
                 
                 elif first_candidate.product_id is not None:
                     for match in ean_matches:
@@ -760,6 +852,7 @@ def run_matching(db_session):
         
         logger.info(f"EAN matching completed: {ean_matched_count} matches found")
         
+        # Отфильтровываем продукты, которые уже имеют product_id
         unmatched_products = [p for p in unmatched_products if p.product_id is None]
         
         category_index = {}
@@ -820,9 +913,20 @@ def run_matching(db_session):
             "failed_matches": 0,
             "confidence_scores": []
         }
+        
+        # Словарь для отслеживания уже сопоставленных продуктов
+        processed_products = {}
 
         for first_candidate in unmatched_products:
             if not first_candidate.store_product_name or "SKIP" in first_candidate.store_product_name:
+                continue
+                
+            # Создаем безопасный уникальный идентификатор для продукта
+            # Используем только гарантированно существующие атрибуты
+            candidate_id = f"{first_candidate.store_id}_{hash(first_candidate.store_product_name)}"
+                
+            # Проверяем, не обработан ли уже этот продукт
+            if candidate_id in processed_products:
                 continue
 
             normalized_name = normalize_string(first_candidate.store_product_name)
@@ -839,127 +943,84 @@ def run_matching(db_session):
                     normalized_name.lower()
                 ).desc()
             ).limit(20).all()
+            
+            # Фильтруем продукты, которые уже обработаны
+            filtered_similar_products = []
+            for p in similar_products:
+                # Создаем идентификатор для каждого похожего продукта тем же способом
+                p_id = f"{p.store_id}_{hash(p.store_product_name)}"
+                
+                if p_id not in processed_products:
+                    filtered_similar_products.append(p)
+            
+            similar_products = filtered_similar_products
 
             first_brand, first_main_words, first_taste, first_attributes, first_type_indicators = estonian_nlp.extract_features(first_candidate.store_product_name)
-            if first_brand:
-                first_brand = normalize_brand(first_brand)
-
+            
             best_match = None
             best_score = 0.0
             best_metrics = {}
 
             for second_candidate in similar_products:
                 second_brand, second_main_words, second_taste, second_attributes, second_type_indicators = estonian_nlp.extract_features(second_candidate.store_product_name)
-                if second_brand:
-                    second_brand = normalize_brand(second_brand)
-
-                if first_brand != second_brand:
-                    continue
-
+                
+                # Сравниваем продукты с обновленным методом
                 nlp_similarity = estonian_nlp.compare_products(
                     first_candidate.store_product_name, 
                     second_candidate.store_product_name
                 )
                 
-                # Сбор детальных метрик для отладки
-                word_similarity = estonian_nlp._calculate_word_similarity(first_main_words, second_main_words)
-                attribute_score = estonian_nlp._calculate_attribute_similarity(first_attributes, second_attributes)
-                taste_score = 0.0
-                if first_taste and second_taste:
-                    if first_taste == second_taste:
-                        taste_score = 1.0
-                    else:
-                        taste_similarity = estonian_nlp._levenshtein_similarity(first_taste, second_taste)
-                        taste_score = taste_similarity if taste_similarity > 0.7 else 0.0
-                elif not first_taste and not second_taste:
-                    taste_score = 0.7
-                
-                unique_words_score = estonian_nlp._compare_unique_words(
-                    first_candidate.store_product_name, 
-                    second_candidate.store_product_name
-                )
-                
-                weights_compatible = estonian_nlp.are_weights_compatible(
-                    first_candidate.store_weight_value,
-                    first_candidate.store_unit_id,
-                    second_candidate.store_weight_value,
-                    second_candidate.store_unit_id,
-                    db_session,
-                    product_name1=first_candidate.store_product_name,
-                    product_name2=second_candidate.store_product_name
-                )
-                
-                if not weights_compatible and first_candidate.store_weight_value and second_candidate.store_weight_value:
-                    continue
-                
-                weight_similarity = 0.0
-                if first_candidate.store_weight_value and second_candidate.store_weight_value:
-                    base_weight1 = estonian_nlp.convert_to_base_unit(
-                        first_candidate.store_weight_value, 
-                        first_candidate.store_unit_id, 
-                        db_session,
-                        first_candidate.store_product_name
-                    )
-                    base_weight2 = estonian_nlp.convert_to_base_unit(
-                        second_candidate.store_weight_value, 
-                        second_candidate.store_unit_id, 
-                        db_session,
-                        second_candidate.store_product_name
-                    )
-                    
-                    if base_weight1 and base_weight2:
-                        weight_diff = abs(base_weight2 - base_weight1)
-                        weight_similarity = 1 - (weight_diff / max(base_weight1, 0.0001))
-
-                total_score = (nlp_similarity * 0.7 + weight_similarity * 0.3) * 100
-
-                # Сохраняем детальные метрики для лучшего совпадения
-                if total_score > best_score:
+                # Сохраняем упрощенные метрики только для лучшего совпадения
+                if nlp_similarity > best_score:
                     best_match = second_candidate
-                    best_score = total_score
+                    best_score = nlp_similarity
+                    
+                    # Дополнительный анализ для заполнения метрик
+                    word_similarity = estonian_nlp._improved_word_similarity(first_main_words, second_main_words) * 100
+                    attribute_score = estonian_nlp._attribute_similarity(first_attributes, second_attributes) * 100
+                    unique_words_score = estonian_nlp._simple_unique_words(
+                        first_candidate.store_product_name, 
+                        second_candidate.store_product_name
+                    ) * 100
+                    
                     best_metrics = {
                         'word_similarity': word_similarity,
                         'attribute_score': attribute_score,
-                        'taste_score': taste_score,
                         'unique_words_score': unique_words_score,
-                        'weight_similarity': weight_similarity,
-                        'first_brand': first_brand,
-                        'second_brand': second_brand,
                         'first_main_words': first_main_words,
                         'second_main_words': second_main_words,
-                        'first_taste': first_taste,
-                        'second_taste': second_taste,
                         'first_attributes': first_attributes,
                         'second_attributes': second_attributes
                     }
                 
                 # Логируем и сохраняем в файл все совпадения выше 50%
-                if total_score >= 50.0:
+                if nlp_similarity >= 50.0:
+                    # Дополнительный анализ для заполнения метрик
+                    word_similarity = estonian_nlp._improved_word_similarity(first_main_words, second_main_words) * 100
+                    attribute_score = estonian_nlp._attribute_similarity(first_attributes, second_attributes) * 100
+                    unique_words_score = estonian_nlp._simple_unique_words(
+                        first_candidate.store_product_name, 
+                        second_candidate.store_product_name
+                    ) * 100
+                    
                     detailed_info = {
                         'word_similarity': word_similarity,
                         'attribute_score': attribute_score,
-                        'taste_score': taste_score,
                         'unique_words_score': unique_words_score,
-                        'weight_similarity': weight_similarity,
-                        'first_brand': first_brand,
-                        'second_brand': second_brand,
                         'first_main_words': first_main_words,
                         'second_main_words': second_main_words,
-                        'first_taste': first_taste,
-                        'second_taste': second_taste,
                         'first_attributes': first_attributes,
                         'second_attributes': second_attributes
                     }
                     
                     # Логируем все совпадения выше 50%
-                    logger.info(f"Potential match (score {total_score:.1f}%): {first_candidate.store_product_name} → {second_candidate.store_product_name}")
-                    logger.info(f"Metrics: Word:{word_similarity*100:.1f}%, Attr:{attribute_score*100:.1f}%, Taste:{taste_score*100:.1f}%, Unique:{unique_words_score*100:.1f}%, Weight:{weight_similarity*100:.1f}%")
+                    logger.info(f"Потенциальное совпадение (оценка {nlp_similarity:.1f}%): {first_candidate.store_product_name} → {second_candidate.store_product_name}")
                     
-                    # Сохраняем в файл с детальной информацией
+                    # Сохраняем в Excel файл
                     save_potential_matches_to_file(
                         first_candidate.store_product_name,
                         second_candidate.store_product_name,
-                        total_score,
+                        nlp_similarity,
                         detailed_info
                     )
             
@@ -969,10 +1030,6 @@ def run_matching(db_session):
             if product_category and product_category in category_thresholds:
                 match_threshold = category_thresholds[product_category]['threshold']
             
-            if first_brand and first_brand in brand_thresholds:
-                first_brand = normalize_brand(first_brand)
-                match_threshold = brand_thresholds[first_brand]['threshold']
-
             if best_match and best_score >= 80.0:
                 logger.info(f"NLP match found for {first_candidate.store_product_name} and {best_match.store_product_name} with score {best_score:.1f}%")
                 logger.info(f"Detailed metrics: {best_metrics}")
@@ -987,6 +1044,13 @@ def run_matching(db_session):
                 if not first_candidate.additional_attributes:
                     first_candidate.additional_attributes = {}
                 first_candidate.additional_attributes["nlp_features"] = nlp_features
+
+                # Отмечаем оба продукта как обработанные
+                processed_products[candidate_id] = True
+                
+                # Создаем идентификатор для best_match тем же способом
+                best_match_id = f"{best_match.store_id}_{hash(best_match.store_product_name)}"
+                processed_products[best_match_id] = True
 
                 if best_match.product_id is not None:
                     first_candidate.product_id = best_match.product_id
@@ -1008,6 +1072,9 @@ def run_matching(db_session):
                 best_match.last_matched = func.now()
                 db_session.commit()
             else:
+                # Отмечаем продукт как обработанный
+                processed_products[candidate_id] = True
+                
                 new_product = product_service.create(db_session, schemas.ProductCreate(
                     name=first_candidate.store_product_name,
                     weight_value=first_candidate.store_weight_value,
