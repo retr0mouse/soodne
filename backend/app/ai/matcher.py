@@ -18,6 +18,19 @@ import io
 
 logger = setup_logger("app.ai.matcher")
 
+def normalize_string(text):
+    """Normalize text by converting to lowercase, removing extra spaces and special characters, and sort words"""
+    if not text:
+        return text
+    # Convert to lowercase and strip whitespace
+    text = text.lower().strip()
+    # Replace multiple spaces with single space
+    text = re.sub(r'\s+', ' ', text)
+    # Sort words
+    words = text.split()
+    words.sort()
+    return ' '.join(words)
+
 class EstonianProductNLP:
     def __init__(self):
         self.common_words = set()
@@ -131,7 +144,7 @@ class EstonianProductNLP:
         if not text:
             return None, [], None, [], []
             
-        text = text.lower()
+        text = normalize_string(text)
         brand = getBrand(text)
         
         main_part = text
@@ -221,18 +234,25 @@ class EstonianProductNLP:
         return None
     
     def _tokenize(self, text):
+        """Tokenize and sort words"""
+        text = normalize_string(text)
         translator = str.maketrans('', '', string.punctuation)
         text = text.translate(translator)
         tokens = [word.strip() for word in text.split() if word.strip()]
+        tokens.sort()  # Sort tokens
         return tokens
     
     def compare_products(self, product1, product2):
         """Compares two products based on extracted features"""
-        normalized_product1 = product1.lower().strip() if product1 else None
-        normalized_product2 = product2.lower().strip() if product2 else None
+        normalized_product1 = normalize_string(product1) if product1 else None
+        normalized_product2 = normalize_string(product2) if product2 else None
         
         brand1, main_words1, taste1, attributes1, type_indicators1 = self.extract_features(normalized_product1)
         brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(normalized_product2)
+        
+        if brand1 and brand2:
+            brand1 = normalize_string(brand1)
+            brand2 = normalize_string(brand2)
         
         if brand1 != brand2:
             return 0.0
@@ -314,6 +334,10 @@ class EstonianProductNLP:
         if not attributes1 or not attributes2:
             return 0.0
         
+        # Sort attributes
+        attributes1 = sorted(attributes1)
+        attributes2 = sorted(attributes2)
+        
         weighted_matches = 0
         total_weight = 0
         
@@ -342,6 +366,10 @@ class EstonianProductNLP:
         if not words1 or not words2:
             return 0.0
             
+        # Sort word lists
+        words1 = sorted(words1)
+        words2 = sorted(words2)
+        
         total_similarity = 0
         total_pairs = 0
         
@@ -623,11 +651,6 @@ def run_matching(db_session):
 
         estonian_nlp.initialize_from_data(db_session)
 
-        def normalize_string(text):
-            if text:
-                return text.lower().strip()
-            return text
-            
         unmatched_products = db_session.query(ProductStoreData).all()
         
         ean_matched_count = 0
@@ -755,18 +778,28 @@ def run_matching(db_session):
             
             similar_products = db_session.query(ProductStoreData).filter(
                 ProductStoreData.store_id != first_candidate.store_id,
-                func.similarity(func.lower(ProductStoreData.store_product_name), normalized_name) > 0.3
+                func.similarity(
+                    func.lower(ProductStoreData.store_product_name), 
+                    normalized_name.lower()
+                ) > 0.3
             ).order_by(
-                func.similarity(func.lower(ProductStoreData.store_product_name), normalized_name).desc()
+                func.similarity(
+                    func.lower(ProductStoreData.store_product_name), 
+                    normalized_name.lower()
+                ).desc()
             ).limit(20).all()
 
             first_brand, first_main_words, first_taste, first_attributes, first_type_indicators = estonian_nlp.extract_features(first_candidate.store_product_name)
+            if first_brand:
+                first_brand = normalize_string(first_brand)
 
             best_match = None
             best_score = 0.0
 
             for second_candidate in similar_products:
                 second_brand, second_main_words, second_taste, second_attributes, second_type_indicators = estonian_nlp.extract_features(second_candidate.store_product_name)
+                if second_brand:
+                    second_brand = normalize_string(second_brand)
 
                 if first_brand != second_brand:
                     continue
@@ -821,6 +854,7 @@ def run_matching(db_session):
                 match_threshold = category_thresholds[product_category]['threshold']
             
             if first_brand and first_brand in brand_thresholds:
+                first_brand = normalize_string(first_brand)
                 match_threshold = brand_thresholds[first_brand]['threshold']
 
             # Save matches between 65% and 80% to file (no console logging)
