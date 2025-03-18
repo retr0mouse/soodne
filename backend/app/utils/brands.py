@@ -1,3 +1,5 @@
+import re
+
 brands = [
     "a. le coq", "agronom", "air wick", "alma", "almeda", "almeda nature care",
     "almeda spa", "alpro", "always", "ariel", "aura", "banquet", "bolsius",
@@ -32,23 +34,51 @@ brands = [
     "vilma", "vita+", "well done", "xpoint", "zott"
 ]
 
+def normalize_string(text):
+    """Normalize text by converting to lowercase, removing extra spaces and special characters"""
+    if not text:
+        return text
+    # Convert to lowercase and strip whitespace
+    text = text.lower().strip()
+    # Replace multiple spaces with single space
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+# Нормализуем список брендов при инициализации
+normalized_brands = [normalize_string(brand) for brand in brands]
+
 def getBrand(title):
-    for brand in brands:
-        if brand in title:
-            return brand
+    if not title:
+        return None
+    
+    normalized_title = normalize_string(title)
+    for brand in normalized_brands:
+        if brand in normalized_title:
+            # Возвращаем оригинальный бренд из списка
+            return brands[normalized_brands.index(brand)]
     return None
 
-# Check if both products have the same brand, returns stripped strings or None
 def compareBrands(title1, title2):
-    brand1 = ''
-    brand2 = ''
-    for brand in brands:
-        if brand in title1:
-            brand1 = brand
-        if brand in title2:
-            brand2 = brand
-
-    if brand1 is not brand2:
+    if not title1 or not title2:
         return None
-    else:
-        return [title1.replace(brand1, ''), title2.replace(brand2, '')]
+        
+    normalized_title1 = normalize_string(title1)
+    normalized_title2 = normalize_string(title2)
+    
+    brand1 = None
+    brand2 = None
+    
+    for brand, normalized_brand in zip(brands, normalized_brands):
+        if normalized_brand in normalized_title1:
+            brand1 = brand
+        if normalized_brand in normalized_title2:
+            brand2 = brand
+            
+    if not brand1 or not brand2 or brand1 != brand2:
+        return None
+        
+    # Удаляем бренд из нормализованных строк
+    result1 = normalized_title1.replace(normalize_string(brand1), '').strip()
+    result2 = normalized_title2.replace(normalize_string(brand2), '').strip()
+    
+    return [result1, result2]

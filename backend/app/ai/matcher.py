@@ -6,7 +6,7 @@ from app.models.product_store_data import ProductStoreData
 from app.models.unit import Unit
 from app import schemas
 from app.services import product_service
-from app.utils.brands import getBrand
+from app.utils.brands import getBrand, normalize_string as normalize_brand
 import nltk
 from collections import Counter
 import string
@@ -146,6 +146,8 @@ class EstonianProductNLP:
             
         text = normalize_string(text)
         brand = getBrand(text)
+        if brand:
+            brand = normalize_brand(brand)
         
         main_part = text
         
@@ -251,8 +253,8 @@ class EstonianProductNLP:
         brand2, main_words2, taste2, attributes2, type_indicators2 = self.extract_features(normalized_product2)
         
         if brand1 and brand2:
-            brand1 = normalize_string(brand1)
-            brand2 = normalize_string(brand2)
+            brand1 = normalize_brand(brand1)
+            brand2 = normalize_brand(brand2)
         
         if brand1 != brand2:
             return 0.0
@@ -283,11 +285,39 @@ class EstonianProductNLP:
         else:
             attribute_score = 0.1
         
+        # Динамические веса в зависимости от наличия данных
+        weights = {
+            'word_similarity': 0.2,
+            'attribute_score': 0.3,
+            'taste_score': 0.2,
+            'unique_words': 0.3
+        }
+
+        # Корректировка весов если нет вкуса
+        if not taste1 and not taste2:
+            weights['word_similarity'] += weights['taste_score'] * 0.5
+            weights['attribute_score'] += weights['taste_score'] * 0.3
+            weights['unique_words'] += weights['taste_score'] * 0.2
+            weights['taste_score'] = 0
+
+        # Корректировка весов если нет атрибутов
+        if not attributes1 and not attributes2:
+            weights['word_similarity'] += weights['attribute_score'] * 0.6
+            weights['unique_words'] += weights['attribute_score'] * 0.4
+            weights['attribute_score'] = 0
+
+        # Если есть только основные слова
+        if not (taste1 or taste2) and not (attributes1 or attributes2):
+            weights['word_similarity'] = 0.6
+            weights['unique_words'] = 0.4
+            weights['taste_score'] = 0
+            weights['attribute_score'] = 0
+
         return (
-            word_similarity * 0.2 +
-            attribute_score * 0.3 +
-            taste_score * 0.2 +
-            unique_words_score * 0.3
+            word_similarity * weights['word_similarity'] +
+            attribute_score * weights['attribute_score'] +
+            taste_score * weights['taste_score'] +
+            unique_words_score * weights['unique_words']
         )
     
     def _compare_unique_words(self, product1, product2):
@@ -791,7 +821,7 @@ def run_matching(db_session):
 
             first_brand, first_main_words, first_taste, first_attributes, first_type_indicators = estonian_nlp.extract_features(first_candidate.store_product_name)
             if first_brand:
-                first_brand = normalize_string(first_brand)
+                first_brand = normalize_brand(first_brand)
 
             best_match = None
             best_score = 0.0
@@ -799,7 +829,7 @@ def run_matching(db_session):
             for second_candidate in similar_products:
                 second_brand, second_main_words, second_taste, second_attributes, second_type_indicators = estonian_nlp.extract_features(second_candidate.store_product_name)
                 if second_brand:
-                    second_brand = normalize_string(second_brand)
+                    second_brand = normalize_brand(second_brand)
 
                 if first_brand != second_brand:
                     continue
@@ -854,7 +884,7 @@ def run_matching(db_session):
                 match_threshold = category_thresholds[product_category]['threshold']
             
             if first_brand and first_brand in brand_thresholds:
-                first_brand = normalize_string(first_brand)
+                first_brand = normalize_brand(first_brand)
                 match_threshold = brand_thresholds[first_brand]['threshold']
 
             # Save matches between 65% and 80% to file (no console logging)
