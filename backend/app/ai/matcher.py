@@ -629,7 +629,7 @@ class EstonianProductNLP:
 estonian_nlp = EstonianProductNLP()
 
 # Function to save potential matches to Excel file
-def save_potential_matches_to_file(first_product, second_product, score):
+def save_potential_matches_to_file(first_product, second_product, score, detailed_info=None):
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d")
         filename = f"potential_matches_{timestamp}.xlsx"
@@ -639,7 +639,9 @@ def save_potential_matches_to_file(first_product, second_product, score):
             wb = Workbook()
             ws = wb.active
             ws.title = "Potential Matches"
-            headers = ['First Product', 'Second Product', 'Score', 'Timestamp']
+            headers = ['First Product', 'Second Product', 'Score', 'Word Similarity', 'Attribute Score', 'Taste Score', 
+                      'Unique Words Score', 'Weight Similarity', 'First Brand', 'Second Brand', 'First Main Words', 
+                      'Second Main Words', 'First Taste', 'Second Taste', 'First Attributes', 'Second Attributes', 'Timestamp']
             for col_num, header in enumerate(headers, 1):
                 col_letter = get_column_letter(col_num)
                 ws[f'{col_letter}1'] = header
@@ -651,7 +653,26 @@ def save_potential_matches_to_file(first_product, second_product, score):
         
         # Add new row
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [first_product, second_product, f"{score:.1f}%", current_time]
+        
+        # Initialize with basic info
+        row = [first_product, second_product, f"{score:.1f}%", "", "", "", "", "", "", "", "", "", "", "", "", "", current_time]
+        
+        # Add detailed metrics if available
+        if detailed_info:
+            row[3] = f"{detailed_info.get('word_similarity', 0) * 100:.1f}%"  # Word Similarity
+            row[4] = f"{detailed_info.get('attribute_score', 0) * 100:.1f}%"  # Attribute Score
+            row[5] = f"{detailed_info.get('taste_score', 0) * 100:.1f}%"      # Taste Score
+            row[6] = f"{detailed_info.get('unique_words_score', 0) * 100:.1f}%" # Unique Words Score
+            row[7] = f"{detailed_info.get('weight_similarity', 0) * 100:.1f}%" # Weight Similarity
+            row[8] = detailed_info.get('first_brand', '')    # First Brand
+            row[9] = detailed_info.get('second_brand', '')   # Second Brand
+            row[10] = str(detailed_info.get('first_main_words', []))  # First Main Words
+            row[11] = str(detailed_info.get('second_main_words', [])) # Second Main Words
+            row[12] = detailed_info.get('first_taste', '')   # First Taste
+            row[13] = detailed_info.get('second_taste', '')  # Second Taste
+            row[14] = str(detailed_info.get('first_attributes', [])) # First Attributes
+            row[15] = str(detailed_info.get('second_attributes', [])) # Second Attributes
+            
         ws.append(row)
         
         # Auto-adjust columns width for better readability
@@ -825,6 +846,7 @@ def run_matching(db_session):
 
             best_match = None
             best_score = 0.0
+            best_metrics = {}
 
             for second_candidate in similar_products:
                 second_brand, second_main_words, second_taste, second_attributes, second_type_indicators = estonian_nlp.extract_features(second_candidate.store_product_name)
@@ -835,6 +857,24 @@ def run_matching(db_session):
                     continue
 
                 nlp_similarity = estonian_nlp.compare_products(
+                    first_candidate.store_product_name, 
+                    second_candidate.store_product_name
+                )
+                
+                # Сбор детальных метрик для отладки
+                word_similarity = estonian_nlp._calculate_word_similarity(first_main_words, second_main_words)
+                attribute_score = estonian_nlp._calculate_attribute_similarity(first_attributes, second_attributes)
+                taste_score = 0.0
+                if first_taste and second_taste:
+                    if first_taste == second_taste:
+                        taste_score = 1.0
+                    else:
+                        taste_similarity = estonian_nlp._levenshtein_similarity(first_taste, second_taste)
+                        taste_score = taste_similarity if taste_similarity > 0.7 else 0.0
+                elif not first_taste and not second_taste:
+                    taste_score = 0.7
+                
+                unique_words_score = estonian_nlp._compare_unique_words(
                     first_candidate.store_product_name, 
                     second_candidate.store_product_name
                 )
@@ -873,9 +913,55 @@ def run_matching(db_session):
 
                 total_score = (nlp_similarity * 0.7 + weight_similarity * 0.3) * 100
 
+                # Сохраняем детальные метрики для лучшего совпадения
                 if total_score > best_score:
                     best_match = second_candidate
                     best_score = total_score
+                    best_metrics = {
+                        'word_similarity': word_similarity,
+                        'attribute_score': attribute_score,
+                        'taste_score': taste_score,
+                        'unique_words_score': unique_words_score,
+                        'weight_similarity': weight_similarity,
+                        'first_brand': first_brand,
+                        'second_brand': second_brand,
+                        'first_main_words': first_main_words,
+                        'second_main_words': second_main_words,
+                        'first_taste': first_taste,
+                        'second_taste': second_taste,
+                        'first_attributes': first_attributes,
+                        'second_attributes': second_attributes
+                    }
+                
+                # Логируем и сохраняем в файл все совпадения выше 50%
+                if total_score >= 50.0:
+                    detailed_info = {
+                        'word_similarity': word_similarity,
+                        'attribute_score': attribute_score,
+                        'taste_score': taste_score,
+                        'unique_words_score': unique_words_score,
+                        'weight_similarity': weight_similarity,
+                        'first_brand': first_brand,
+                        'second_brand': second_brand,
+                        'first_main_words': first_main_words,
+                        'second_main_words': second_main_words,
+                        'first_taste': first_taste,
+                        'second_taste': second_taste,
+                        'first_attributes': first_attributes,
+                        'second_attributes': second_attributes
+                    }
+                    
+                    # Логируем все совпадения выше 50%
+                    logger.info(f"Potential match (score {total_score:.1f}%): {first_candidate.store_product_name} → {second_candidate.store_product_name}")
+                    logger.info(f"Metrics: Word:{word_similarity*100:.1f}%, Attr:{attribute_score*100:.1f}%, Taste:{taste_score*100:.1f}%, Unique:{unique_words_score*100:.1f}%, Weight:{weight_similarity*100:.1f}%")
+                    
+                    # Сохраняем в файл с детальной информацией
+                    save_potential_matches_to_file(
+                        first_candidate.store_product_name,
+                        second_candidate.store_product_name,
+                        total_score,
+                        detailed_info
+                    )
             
             match_threshold = 82.0
             
@@ -887,16 +973,9 @@ def run_matching(db_session):
                 first_brand = normalize_brand(first_brand)
                 match_threshold = brand_thresholds[first_brand]['threshold']
 
-            # Save matches between 65% and 80% to file (no console logging)
-            if best_match and best_score < 80.0 and best_score >= 65.0:
-                save_potential_matches_to_file(
-                    first_candidate.store_product_name,
-                    best_match.store_product_name,
-                    best_score
-                )
-
             if best_match and best_score >= 80.0:
                 logger.info(f"NLP match found for {first_candidate.store_product_name} and {best_match.store_product_name} with score {best_score:.1f}%")
+                logger.info(f"Detailed metrics: {best_metrics}")
 
                 nlp_features = {
                     "brand": first_brand,
