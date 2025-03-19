@@ -24,6 +24,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoS
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
+import uuid
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -46,7 +47,8 @@ def scrape_store_products():
         stores = {
             "Barbora": "https://barbora.ee",
             "Rimi": "https://www.rimi.ee/epood/ee",
-            "Selver": "https://www.selver.ee"
+            "Selver": "https://www.selver.ee",
+            "Prisma": "https://www.prismamarket.ee"
         }
         
         for store_name, url in stores.items():
@@ -96,6 +98,10 @@ def process_store(db: Session, store):
             logger.info("Starting Selver scraping...")
             get_all_selver_items(db, store, headers, user_agent)
             logger.info("Finished Selver scraping")
+        case 'Prisma':
+            logger.info("Starting Prisma scraping...")
+            get_all_prisma_items(db, store, headers, user_agent)
+            logger.info("Finished Prisma scraping")
         case _:
             logger.info(f"No scraper for store {store} is implemented")
 
@@ -782,4 +788,338 @@ def get_selver_items_by_category(category, headers, user_agent):
         logger.error(f"Error fetching products from Selver API: {str(e)}", exc_info=True)
     
     logger.debug(f"Final total products collected for category {category['name']}: {len(result_products)}")
+    return result_products
+
+def get_all_prisma_items(db: Session, store, headers, user_agent):
+    logger.info("Fetching Prisma categories...")
+    categories = get_prisma_categories(headers, user_agent)
+    logger.info(f"Found {len(categories)} Prisma categories")
+    
+    for category_index, category in enumerate(categories, 1):
+        logger.info(f"Processing Prisma category {category_index}/{len(categories)}: {category['name']}")
+        if not category['link']:
+            logger.warning(f"Skipping category {category['name']} - no link available")
+            continue
+            
+        category_items = get_prisma_items_by_category(category, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category['name']}")
+        
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            process_item(db, store, item)
+
+def get_prisma_categories(headers, user_agent):
+    try:
+        # Make a request to the Prisma homepage to get the store ID
+        url = "https://www.prismamarket.ee/"
+        logger.debug(f"Requesting Prisma homepage: {url}")
+        
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        
+        # Look for the Apollo state data containing store information
+        html_content = response.text
+        
+        # Find the Apollo state data that contains store information
+        apollo_state_pattern = r'<script id="__APOLLO_STATE__" type="application/json">(.*?)</script>'
+        apollo_state_match = re.search(apollo_state_pattern, html_content, re.DOTALL)
+        
+        if not apollo_state_match:
+            logger.warning("Could not find Apollo state data in Prisma homepage")
+            return []
+            
+        apollo_state_json = apollo_state_match.group(1)
+        apollo_state = json.loads(apollo_state_json)
+        
+        # Find the store ID
+        store_id = None
+        for key in apollo_state:
+            if 'store(' in key and '"id"' in key:
+                store_id_match = re.search(r'store\(\{\"id\":\"(\d+)\"\}\)', key)
+                if store_id_match:
+                    store_id = store_id_match.group(1)
+                    logger.debug(f"Found Prisma store ID: {store_id}")
+                    break
+        
+        if not store_id:
+            store_id = "542860184"  # Default store ID if not found
+            logger.debug(f"Using default Prisma store ID: {store_id}")
+        
+        # Now use the specific GraphQL API call for categories
+        api_url = "https://graphql-api.prismamarket.ee/"
+        
+        # Prepare the query parameters exactly as provided
+        graphql_params = {
+            "operationName": "RemoteGetCategoryNavigationMenuContent",
+            "variables": json.dumps({
+                "userConsent": {"tracking": None},
+                "preview": False,
+                "storeId": store_id
+            }),
+            "extensions": json.dumps({
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "251b0aac3125368e16e78bb4eb71c26dc765cbf57af6ef48de91bef7e038a032"
+                }
+            })
+        }
+        
+        # Setup headers for the GraphQL request
+        graphql_headers = {
+            'User-Agent': user_agent,
+            'Accept': '*/*',
+            'Accept-Language': 'et',
+            'Content-Type': 'application/json',
+            'Origin': 'https://www.prismamarket.ee',
+            'Referer': 'https://www.prismamarket.ee/',
+            'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'x-client-name': 'skaupat-web',
+            'x-client-version': 'production-1a3b473e0b939473b0810fc73dea567de2c4e3a9'
+        }
+        
+        logger.debug(f"Requesting Prisma categories from GraphQL API with store ID: {store_id}")
+        
+        # Make the API request
+        response = requests.get(api_url, params=graphql_params, headers=graphql_headers)
+        response.raise_for_status()
+        
+        categories_data = response.json()
+        logger.debug(f"Received categories data from GraphQL API: {json.dumps(categories_data)[:200]}...")
+        
+        # Extract categories from the response
+        categories = []
+        
+        # Extract navigation items from the GraphQL response
+        if 'data' in categories_data and 'categoryNavigationMenu' in categories_data['data']:
+            nav_items = categories_data['data']['categoryNavigationMenu'].get('items', [])
+            
+            for item in nav_items:
+                if 'id' in item and 'name' in item and 'slug' in item:
+                    category = {
+                        'id': item['id'],
+                        'name': item['name'],
+                        'slug': item['slug'],
+                        'link': f"/kategooriad/{item['slug']}",
+                        'store_id': store_id
+                    }
+                    categories.append(category)
+                    logger.debug(f"Added Prisma category: {category['name']} with slug: {category['slug']}")
+        
+        # Filter to focus on food-related categories if needed
+        if categories:
+            logger.info(f"Found {len(categories)} main categories from Prisma")
+            return categories
+        else:
+            # If GraphQL API didn't work, fallback to extracting from Apollo state
+            logger.warning("Couldn't get categories from GraphQL API, falling back to Apollo state extraction")
+            
+            # Extract main navigation items from Apollo state
+            main_navigation_key = None
+            
+            # Find the main navigation key
+            for key in apollo_state:
+                if 'mainNavigation' in key and 'navigationItems' in apollo_state[key]:
+                    main_navigation_key = key
+                    break
+            
+            if not main_navigation_key:
+                logger.warning("Could not find main navigation data in Apollo state")
+                return []
+                
+            # Get navigation item references
+            nav_item_refs = apollo_state[main_navigation_key]['navigationItems']
+            
+            # Extract category data from each navigation item reference
+            for item_ref in nav_item_refs:
+                ref = item_ref.get('__ref')
+                if ref and ref in apollo_state:
+                    item_data = apollo_state[ref]
+                    
+                    # Only consider categories with necessary data
+                    if 'id' in item_data and 'name' in item_data and 'link' in item_data:
+                        category = {
+                            'id': item_data['id'],
+                            'name': item_data['name'],
+                            'slug': item_data.get('slug', item_data['link'].split('/')[-1]),
+                            'link': item_data['link'],
+                            'store_id': store_id
+                        }
+                        categories.append(category)
+                        logger.debug(f"Added Prisma category from Apollo state: {category['name']} with link: {category['link']}")
+            
+            logger.info(f"Found {len(categories)} categories from Apollo state")
+            return categories
+        
+    except Exception as e:
+        logger.error(f"Error getting Prisma categories: {str(e)}", exc_info=True)
+        return []
+
+def get_prisma_items_by_category(category, headers, user_agent):
+    result_products = []
+    
+    try:
+        # Get category slug from the link
+        slug = category['slug'] if 'slug' in category else category['link'].split('/')[-1]
+        
+        # Get store ID from category data or use default
+        store_id = category.get('store_id', '542860184')
+        
+        # Set up the referrer URL for this category
+        category_url = f"https://www.prismamarket.ee{category['link']}"
+        logger.debug(f"Processing category: {category['name']} (slug: {slug}, store_id: {store_id})")
+        
+        # First visit the category page to extract the needed hash value
+        response = requests.get(category_url, headers=headers)
+        response.raise_for_status()
+        
+        html_content = response.text
+        
+        # Extract the hash for product queries
+        hash_pattern = r'sha256Hash":"([a-f0-9]+)".*?RemoteFilteredProducts'
+        hash_match = re.search(hash_pattern, html_content)
+        
+        if not hash_match:
+            logger.error(f"Could not find hash parameter for RemoteFilteredProducts on category page: {category_url}")
+            return result_products
+            
+        products_hash = hash_match.group(1)
+        logger.debug(f"Extracted sha256Hash for products: {products_hash}")
+        
+        # Generate a random session ID
+        session_id = str(uuid.uuid4())
+        
+        # GraphQL API endpoint
+        api_url = "https://graphql-api.prismamarket.ee/"
+        
+        # Use a large limit to get many products at once (1000)
+        limit = 1000
+        from_index = 0
+        total_items = None
+        
+        # Setup proper headers for the GraphQL request
+        graphql_headers = {
+            'User-Agent': user_agent,
+            'Accept': '*/*',
+            'Accept-Language': 'et',
+            'Content-Type': 'application/json',
+            'Origin': 'https://www.prismamarket.ee',
+            'Referer': category_url,
+            'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'x-client-name': 'skaupat-web',
+            'x-client-version': 'production-1a3b473e0b939473b0810fc73dea567de2c4e3a9'
+        }
+        
+        logger.debug(f"Fetching products for category {category['name']} with session ID: {session_id}")
+        
+        while total_items is None or from_index < total_items:
+            # Variables for the GraphQL query
+            variables = {
+                "facets": [
+                    {"key": "brandName", "order": "asc"},
+                    {"key": "labels"}
+                ],
+                "generatedSessionId": session_id,
+                "includeAgeLimitedByAlcohol": True,
+                "limit": limit,
+                "queryString": "",
+                "searchProvider": "loop54",
+                "slug": slug,
+                "storeId": store_id,
+                "useRandomId": False,
+                "from": from_index
+            }
+            
+            # Construct the GraphQL request
+            payload = {
+                "operationName": "RemoteFilteredProducts",
+                "variables": variables,
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": products_hash
+                    }
+                }
+            }
+            
+            # Make the request
+            response = requests.post(api_url, headers=graphql_headers, json=payload)
+            
+            if response.status_code != 200:
+                logger.error(f"Error fetching products from Prisma API: {response.status_code} - {response.text}")
+                break
+                
+            data = response.json()
+            
+            # Extract products data
+            if 'data' in data and 'store' in data['data'] and 'products' in data['data']['store']:
+                products_data = data['data']['store']['products']
+                items = products_data.get('items', [])
+                
+                # Update total for pagination
+                if total_items is None:
+                    total_items = products_data.get('total', 0)
+                    logger.debug(f"Total products in category {category['name']}: {total_items}")
+                
+                # Process each product
+                for item in items:
+                    try:
+                        name = item.get('name', '')
+                        price = item.get('price', 0)
+                        
+                        # Get image URL
+                        image_url = None
+                        if 'images' in item and item['images'] and len(item['images']) > 0:
+                            image_url = item['images'][0].get('url', '')
+                        
+                        # Extract weight and unit from product name
+                        weight_value, unit_name = parse_product_details(name)
+                        
+                        result_products.append({
+                            'name': name,
+                            'price': price,
+                            'image': image_url,
+                            'weight_value': weight_value,
+                            'unit_name': unit_name
+                        })
+                        
+                        logger.debug(f"""
+                            Processing raw item data:
+                            - Name: {name}
+                            - Price: {price}
+                            - Image: {image_url}
+                            - Weight Value: {weight_value}
+                            - Unit Name: {unit_name}
+                        """)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error parsing product: {str(e)}")
+                        continue
+                
+                # Increment from_index for next page
+                from_index += len(items)
+                
+                # Break if we got fewer items than requested (last page)
+                if len(items) < limit:
+                    break
+                    
+                # Add a small delay between requests
+                time.sleep(random_delay(0.5, 1))
+            else:
+                logger.warning("Unexpected response structure from Prisma API")
+                break
+                
+    except Exception as e:
+        logger.error(f"Error in get_prisma_items_by_category: {str(e)}", exc_info=True)
+    
+    logger.debug(f"Total products collected for category {category['name']}: {len(result_products)}")
     return result_products
