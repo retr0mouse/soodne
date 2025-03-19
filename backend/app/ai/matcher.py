@@ -6,12 +6,11 @@ from app.models.product_store_data import ProductStoreData
 from app.models.unit import Unit
 from app import schemas
 from app.services import product_service
-from app.utils.brands import getBrand
 from collections import Counter
 import string
 import os
 import pandas as pd
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 from typing import Dict, List, Tuple, Optional, Set, Union, Any
 
 logger = setup_logger("app.ai.matcher")
@@ -66,67 +65,89 @@ class EstonianProductNLP:
         product_data = db_session.query(ProductStoreData).all()
         product_names = [p.store_product_name for p in product_data if p.store_product_name]
         
+        # Базовые маркеры вкуса для начального обнаружения
         base_taste_markers = ['maitsega', 'maitse', 'mts', 'maits', 'ga', 'ega', 'maitseline', 
                               'maitsest', 'maits-', '-maits', 'maitsestatud', 'maustatud', 
-                              'aroom', 'lõhn', 'maitseline', 'maitsel', 'mait.', 'm-ga']
+                              'aroom', 'lõhn', 'maitsel', 'mait.', 'm-ga']
         for marker in base_taste_markers:
             self.taste_markers.append(marker)
+        
+        # Базовые суффиксы для эстонского языка
+        self.estonian_suffixes = ['ga', 'ega', 'ne', 'line', 'st', 'ni', 'dega', 'tatud', 'na', 'tega']
         
         self.update_common_words(product_names)
         self.update_taste_markers(product_names)
         
     def update_taste_markers(self, product_names):
-        """Dynamically identifies taste markers based on product analysis"""
+        """Динамически идентифицирует вкусовые маркеры на основе анализа продуктов"""
         if not product_names:
             return
             
+        # Словарь для отслеживания потенциальных вкусовых слов и их частоты
+        potential_taste_words = {}
+        
+        # Анализируем названия продуктов для поиска вкусовых шаблонов
         for name in product_names:
             if not name:
                 continue
                 
-            # Find flavor patterns in Estonian
-            flavor_et = re.findall(r'([a-zA-ZäöüõÄÖÜÕ]+(?:\s+[a-zA-ZäöüõÄÖÜÕ]+)?)\s+maitse[a-zA-ZäöüõÄÖÜÕ]*', name.lower())
-            for match in flavor_et:
-                self.dynamic_taste_words[match.strip()] = self.dynamic_taste_words.get(match.strip(), 0) + 1
+            # Преобразуем в нижний регистр для анализа
+            name_lower = name.lower()
             
+            # Шаг 1: Поиск с использованием базовых маркеров
             for marker in self.taste_markers:
-                if marker in name.lower():
-                    words = name.lower().split()
+                if marker in name_lower:
+                    words = name_lower.split()
                     marker_index = -1
+                    
+                    # Найти слово с маркером
                     for i, word in enumerate(words):
                         if marker in word:
                             marker_index = i
                             break
                     
-                    if marker_index >= 0 and marker_index < len(words) - 1:
-                        next_word = words[marker_index + 1]
-                        if len(next_word) > 2:
-                            self.dynamic_taste_words[next_word] = self.dynamic_taste_words.get(next_word, 0) + 1
+                    # Проверить слова до и после маркера
+                    for offset in [-1, 1]:  # Проверяем слово до и после
+                        neighbor_idx = marker_index + offset
+                        if 0 <= neighbor_idx < len(words):
+                            neighbor = words[neighbor_idx]
+                            if len(neighbor) > 2 and not neighbor.isdigit():
+                                potential_taste_words[neighbor] = potential_taste_words.get(neighbor, 0) + 1
+            
+            # Шаг 2: Поиск словосочетаний со словом "maitse" (вкус)
+            flavor_matches = re.findall(r'([a-zA-ZäöüõÄÖÜÕ]+(?:\s+[a-zA-ZäöüõÄÖÜÕ]+)?)\s+maitse[a-zA-ZäöüõÄÖÜÕ]*', name_lower)
+            for match in flavor_matches:
+                if match.strip() and len(match.strip()) > 2:
+                    potential_taste_words[match.strip()] = potential_taste_words.get(match.strip(), 0) + 2  # Усиленный вес
+            
+            # Шаг 3: Поиск слов с суффиксами, характерными для вкусовых описаний
+            words = name_lower.split()
+            for word in words:
+                for suffix in self.estonian_suffixes:
+                    if word.endswith(suffix) and len(word) > len(suffix) + 2:
+                        base_word = word[:-len(suffix)]
+                        if len(base_word) > 2:
+                            potential_taste_words[base_word] = potential_taste_words.get(base_word, 0) + 1
+                            potential_taste_words[word] = potential_taste_words.get(word, 0) + 1
         
+        # Шаг 4: Добавление часто встречающихся вкусовых слов в список маркеров
         total_products = len(product_names)
-        threshold = 0.01
+        min_frequency = max(3, total_products * 0.01)  # Минимум 3 вхождения или 1% от всех продуктов
         
-        for word, count in self.dynamic_taste_words.items():
-            if count / total_products >= threshold and word not in self.taste_markers:
-                suffix_markers = [word + s for s in ['ga', 'ega', 'ne', 'line', 'st']]
-                self.taste_markers.extend(suffix_markers)
+        new_markers = []
+        for word, count in potential_taste_words.items():
+            if count >= min_frequency and word not in self.taste_markers:
+                new_markers.append(word)
+                # Добавляем также слова с распространенными суффиксами
+                for suffix in self.estonian_suffixes:
+                    suffixed_word = word + suffix
+                    if suffixed_word not in self.taste_markers:
+                        new_markers.append(suffixed_word)
         
-        for name in product_names:
-            if not name:
-                continue
-                
-            words = name.lower().split()
-            for i, word in enumerate(words):
-                if i > 0 and word in self.dynamic_taste_words and self.dynamic_taste_words[word] > 5:
-                    prev_word = words[i-1]
-                    if len(prev_word) > 2 and prev_word not in self.taste_markers:
-                        self.dynamic_taste_markers[prev_word] = self.dynamic_taste_markers.get(prev_word, 0) + 1
+        # Добавляем новые маркеры в основной список
+        self.taste_markers.extend(new_markers)
         
-        for marker, count in self.dynamic_taste_markers.items():
-            if count > 3 and marker not in self.taste_markers:
-                self.taste_markers.append(marker)
-        
-        logger.debug(f"Updated taste markers list. Total markers: {len(self.taste_markers)}")
+        logger.debug(f"Динамически обновлен список вкусовых маркеров. Всего маркеров: {len(self.taste_markers)}")
         
     def update_common_words(self, product_names, force_threshold=None):
         """Dynamically updates the list of common words based on analysis of existing product names"""
@@ -153,52 +174,77 @@ class EstonianProductNLP:
         
         logger.debug(f"Updated common words list. Total words: {len(self.common_words)}")
         
-    def extract_features(self, text):
-        """Extract features from product text"""
-        if not text:
+    def extract_features(self, product_name):
+        """Extract main words and attributes from product name with improved logic"""
+        if not product_name:
             return [], []
-            
-        normalized_text = normalize_string(text)
         
-        # Split text into tokens
-        tokens = self._tokenize(normalized_text)
+        # Нормализация входной строки
+        product_name = normalize_string(product_name) if isinstance(product_name, str) else ""
         
-        # Extract attributes (words in brackets, after commas, etc.)
+        # Удаление знаков препинания и приведение к нижнему регистру
+        clean_name = re.sub(r'[.,;:!?"\'()]', ' ', product_name.lower())
+        
+        # Токенизация
+        words = [w for w in re.split(r'\s+', clean_name) if w]
+        
+        # Отдельное сохранение числовых атрибутов и единиц измерения
         attributes = []
+        main_words = []
+        flavor_words = []
         
-        # Find words in brackets
-        bracket_pattern = re.compile(r'\((.*?)\)')
-        bracket_matches = bracket_pattern.findall(normalized_text)
-        for match in bracket_matches:
-            # Add string values, not tuples
-            attributes.extend([token for token in self._tokenize(match)])
-            normalized_text = bracket_pattern.sub('', normalized_text)
+        # Регулярное выражение для определения числовых значений с единицами измерения
+        weight_pattern = re.compile(r'^(\d+[.,]?\d*)(g|gr|kg|ml|l|cl|tk|tk\.|gb|tb|x\d+.*)$', re.IGNORECASE)
+        percentage_pattern = re.compile(r'^(\d+[.,]?\d*)%$')
+        dimension_pattern = re.compile(r'^\d+[xX*]\d+.*$')  # Например, 4x100g
         
-        # Find parts after comma
-        comma_parts = normalized_text.split(',')
-        if len(comma_parts) > 1:
-            normalized_text = comma_parts[0]
-            for part in comma_parts[1:]:
-                # Make sure we're adding strings
-                attributes.extend([token for token in self._tokenize(part)])
+        for word in words:
+            # Проверка, является ли слово числовым атрибутом
+            is_attribute = (
+                weight_pattern.match(word) or 
+                percentage_pattern.match(word) or
+                dimension_pattern.match(word) or
+                word.replace(',', '.').replace('x', '').replace('%', '').isdigit()
+            )
+            
+            # Если слово является числовым атрибутом, добавляем его только в атрибуты
+            if is_attribute:
+                attributes.append(word)
+                continue
+            
+            # Проверяем на наличие вкусовых маркеров
+            contains_taste_marker = False
+            for marker in self.taste_markers:
+                if marker in word and len(word) > len(marker) + 1:
+                    contains_taste_marker = True
+                    # Добавляем слово как важное для вкуса
+                    flavor_words.append(word)
+                    
+                    # Также добавляем его в основные слова
+                    if not self._is_common_word(word) and len(word) > 1:
+                        main_words.append(word)
+                    break
+            
+            # Если это не атрибут и не вкусовой маркер - проверяем базовые условия
+            if not contains_taste_marker and not self._is_common_word(word) and len(word) > 1:
+                main_words.append(word)
         
-        # Define the pattern for weights directly
-        weight_pattern = r'\b\d+x\d+[a-z]*\b|\b\d+[a-z]*\b'
+        # Добавить проверку для разделения составных слов
+        final_main_words = []
+        for word in main_words:
+            # Разделение составных слов типа "maasika-nektariini"
+            if '-' in word:
+                parts = word.split('-')
+                final_main_words.extend([p for p in parts if p and len(p) > 1])
+            else:
+                final_main_words.append(word)
         
-        # Find weights and units of measurement
-        weight_matches = re.findall(weight_pattern, normalized_text)
-        for match in weight_matches:
-            if match and match not in attributes:
-                attributes.append(match)
+        # Также добавляем отдельно извлеченные вкусовые слова, если они не дублируются
+        for word in flavor_words:
+            if word not in final_main_words:
+                final_main_words.append(word)
         
-        # Get the main words
-        main_words = self._tokenize(normalized_text)
-        
-        # Remove duplicates and ensure all elements are strings
-        main_words = [str(word) for word in list(set(main_words))]
-        attributes = [str(attr) for attr in list(set(attributes))]
-        
-        return main_words, attributes
+        return final_main_words, attributes
     
     def _tokenize(self, text):
         """Tokenize and sort words"""
@@ -218,132 +264,24 @@ class EstonianProductNLP:
                 word in self.dynamic_common_words and 
                 self.dynamic_common_words[word] >= self.common_words_threshold)
 
-    def _calculate_word_similarity(self, words1, words2, critical_words1=None, critical_words2=None):
-        """
-        Calculate similarity between two sets of words.
-        Gives higher importance to critical words.
-        """
-        # Normalize all words
-        norm_words1 = []
-        for word in words1:
-            try:
-                if not isinstance(word, str):
-                    word = str(word)
-                norm_words1.append(normalize_string(word.lower()))
-            except:
-                continue
-        
-        norm_words2 = []
-        for word in words2:
-            try:
-                if not isinstance(word, str):
-                    word = str(word)
-                norm_words2.append(normalize_string(word.lower()))
-            except:
-                continue
-        
-        # If after normalization, word sets are empty
-        if not norm_words1 or not norm_words2:
-            # Если оба набора пусты, это считается совпадением
-            if not norm_words1 and not norm_words2:
-                return 1.0
-            # Если только один набор пуст, даем небольшой штраф вместо полного отказа
-            return 0.3
-        
-        # Handle critical words if present
-        if critical_words1 and critical_words2:
-            critical_match_score = 0
-            critical_total = len(critical_words1)
-            
-            if critical_total > 0:
-                for word1 in critical_words1:
-                    best_critical_match = 0
-                    for word2 in critical_words2:
-                        if word1 == word2:
-                            similarity = 1.0
-                        elif word1 in word2 or word2 in word1:
-                            similarity = 0.9
-                        else:
-                            similarity = self._levenshtein_similarity(word1, word2)
-                        
-                        best_critical_match = max(best_critical_match, similarity)
-                    
-                    if best_critical_match > 0.8:
-                        critical_match_score += 1
-                
-                critical_ratio = critical_match_score / critical_total
-                # Если критические слова не совпали, даем сильный штраф, но не 0
-                if critical_ratio < 0.5:
-                    return 0.4  # Сильный штраф вместо 0
-        
-        # Handle critical words - words that must match for products to be similar
-        non_critical_words1 = [w for w in norm_words1 if critical_words1 is None or w not in critical_words1]
-        
-        # Check if any critical words don't match well
-        non_critical_mismatch_count = 0
-        for word1 in non_critical_words1:
-            best_match_score = 0.0
-            for word2 in norm_words2:
-                # Check for exact match first
-                if word1 == word2:
-                    similarity = 1.0
-                # Check for partial match (one word contains the other)
-                elif word1 in word2 or word2 in word1:
-                    similarity = 0.9
-                else:
-                    similarity = self._levenshtein_similarity(word1, word2)
-                
-                best_match_score = max(best_match_score, similarity)
-            
-            # Оставляем оригинальный порог 0.70 для некритичных слов
-            if best_match_score < 0.70:
-                non_critical_mismatch_count += 1
-        
-        # Penalize if too many non-critical words don't match well
-        non_critical_mismatch_ratio = non_critical_mismatch_count / len(non_critical_words1) if non_critical_words1 else 0
-        
-        # Original code for calculating overall similarity, adjusted for non-critical mismatches
-        total_similarity = 0.0
-        max_possible = max(len(norm_words1), len(norm_words2))
-        
-        if max_possible == 0:
-            return 1.0  # Оба набора пусты после отфильтровывания
-        
-        # Count total matching words
-        matches = 0
-        for word1 in norm_words1:
-            for word2 in norm_words2:
-                # Оставляем оригинальный порог 0.8 для сходства слов
-                if word1 == word2 or word1 in word2 or word2 in word1 or self._levenshtein_similarity(word1, word2) > 0.8:
-                    matches += 1
-                    break
-        
-        # Reduce final score based on non-critical mismatches
-        similarity_score = matches / max_possible
-        # Делаем более строгим порог для штрафа и увеличиваем сам штраф
-        if non_critical_mismatch_ratio > 0.3:  # Если более 30% (вместо 50%) некритичных слов не совпадают
-            similarity_score *= (1 - 0.3 * non_critical_mismatch_ratio)  # Снижаем оценку до 30% (вместо 20%)
-        
-        return similarity_score
-
-    def _levenshtein_similarity(self, str1, str2):
-        """
-        Calculate similarity measure using the rapidfuzz library.
-        Returns a value from 0 to 1, where 1 is a perfect match.
-        """
-        if not str1 or not str2:
+    def _calculate_word_similarity(self, words1, words2):
+        """Calculate similarity based on words with improved logic"""
+        if not words1 or not words2:
             return 0.0
         
-        # Normalize strings before comparison
-        str1 = normalize_string(str1.lower())
-        str2 = normalize_string(str2.lower())
+        # Создаем множества слов, игнорируя числовые значения
+        set1 = set([w for w in words1 if not w.replace('.', '').replace(',', '').isdigit()])
+        set2 = set([w for w in words2 if not w.replace('.', '').replace(',', '').isdigit()])
         
-        # If strings are identical, return 1 immediately
-        if str1 == str2:
-            return 1.0
+        # Если после фильтрации остались пустые множества, возвращаем 0
+        if not set1 or not set2:
+            return 0.0
         
-        # Use fuzz.ratio from rapidfuzz to get string similarity
-        similarity = fuzz.ratio(str1, str2) / 100.0
+        # Находим общие слова и уникальные слова для каждого продукта
+        common_words = set1.intersection(set2)
+        
+        # Вычисляем сходство
+        similarity = len(common_words) / max(len(set1), len(set2))
         
         return similarity
 
@@ -430,6 +368,26 @@ class EstonianProductNLP:
         elif not unique_words1 or not unique_words2:
             return 0.0
         
+        # Проверка на разные ключевые слова (потенциально указывающие на разные вкусы/типы)
+        different_key_words = False
+        # Слова, которые не совпадают между двумя продуктами
+        diff_words1 = set(unique_words1) - set(unique_words2)
+        diff_words2 = set(unique_words2) - set(unique_words1)
+        
+        # Если в обоих наборах есть различающиеся слова
+        if diff_words1 and diff_words2:
+            # Проверяем, насколько сильно они отличаются
+            for word1 in diff_words1:
+                for word2 in diff_words2:
+                    # Более строгое сравнение для длинных слов
+                    if len(word1) > 4 and len(word2) > 4 and self._levenshtein_similarity(word1, word2) < 0.65:
+                        different_key_words = True
+                        break
+                    
+        # Если обнаружены серьезные различия, сильно снижаем оценку
+        if different_key_words:
+            return 0.3  # Раньше мы не делали такую проверку в этой функции
+        
         # Find matching unique words
         matches = 0
         for word1 in unique_words1:
@@ -474,8 +432,12 @@ class EstonianProductNLP:
         units_pattern = '|'.join(patterns_to_use.keys())
         weight_pattern = rf'(\d+[.,]?\d*)\s*({units_pattern})'
         
-        weight1 = re.findall(weight_pattern, product1.lower().replace(',', '.'))
-        weight2 = re.findall(weight_pattern, product2.lower().replace(',', '.'))
+        # Нормализуем продукты перед поиском весов
+        norm_product1 = normalize_string(product1.lower() if isinstance(product1, str) else "").replace(',', '.')
+        norm_product2 = normalize_string(product2.lower() if isinstance(product2, str) else "").replace(',', '.')
+        
+        weight1 = re.findall(weight_pattern, norm_product1)
+        weight2 = re.findall(weight_pattern, norm_product2)
         
         # If either product has no weight information, consider weights matching
         if not weight1 or not weight2:
@@ -505,11 +467,11 @@ class EstonianProductNLP:
         if not self._compare_weights(product1, product2, units_dict or {}):
             return 0.0
         
-        # Compare main words taking critical attributes into account
+        # Compare main words
         word_similarity = self._calculate_word_similarity(main_words1, main_words2)
         
-        # If main words don't match well enough, stop comparison
-        if word_similarity < 0.3:
+        # Если основные слова не совпадают хорошо, прекращаем проверку
+        if word_similarity < 0.45:
             return 0.0
         
         # Compare attributes
@@ -518,15 +480,61 @@ class EstonianProductNLP:
         # Compare unique words
         unique_words_score = self._simple_unique_words(product1, product2)
         
-        # Updated weight distribution
-        total_score = (
-            word_similarity * 0.4 + 
-            attribute_score * 0.4 + 
-            unique_words_score * 0.2
+        # Проверяем разницу составов слов (для определения разных брендов без списка)
+        different_words1 = set(main_words1) - set(main_words2)
+        different_words2 = set(main_words2) - set(main_words1)
+        
+        # Проверяем на вкусовые различия с сильным штрафом
+        taste_diff_penalty = 1.0
+        
+        # Проверяем различающиеся слова на наличие вкусовых маркеров
+        flavor_diff1 = []
+        for word in different_words1:
+            word_lower = word.lower()
+            for marker in self.taste_markers:
+                if (marker in word_lower and len(word) > len(marker) + 1) or word_lower in self.taste_markers:
+                    flavor_diff1.append(word)
+                    break
+        
+        flavor_diff2 = []
+        for word in different_words2:
+            word_lower = word.lower()
+            for marker in self.taste_markers:
+                if (marker in word_lower and len(word) > len(marker) + 1) or word_lower in self.taste_markers:
+                    flavor_diff2.append(word)
+                    break
+        
+        # Увеличенный штраф за различия во вкусе
+        if flavor_diff1 or flavor_diff2:
+            taste_diff_penalty = 0.5  # 50% штраф за вкусовые различия
+        
+        # Если есть большая разница в составе слов, снижаем итоговую оценку
+        word_diff_penalty = 1.0
+        if (different_words1 and different_words2 and 
+            len(different_words1) >= 2 and len(different_words2) >= 2):
+            word_diff_penalty = 0.7  # 30% штраф за общие различия в словах
+        
+        # Расчет базовой оценки
+        base_score = (
+            word_similarity * 0.44 +
+            attribute_score * 0.22 +
+            unique_words_score * 0.44
         )
+        
+        # Применяем штрафы последовательно
+        total_score = base_score * word_diff_penalty * taste_diff_penalty
         
         # Return percentage for better readability
         return total_score * 100
+
+    def _levenshtein_similarity(self, s1, s2):
+        """Calculate string similarity using RapidFuzz library."""
+        if not s1 or not s2:
+            return 0.0
+        
+        # Используем ratio из библиотеки RapidFuzz для нормализованного сходства Левенштейна
+        # Это возвращает значение между 0 и 100, поэтому делим на 100
+        return fuzz.ratio(s1.lower(), s2.lower()) / 100.0
 
 class ProductMatcher:
     def __init__(self, config=None):
@@ -537,7 +545,7 @@ class ProductMatcher:
         
         # Установка порогов сопоставления
         # Общий порог для автоматического сопоставления
-        self.threshold = 0.90  # Меняем с 0.95 на 0.90 (90%)
+        self.threshold = 0.85  # Меняем с 0.95 на 0.85 (85%)
         
         # Порог для потенциальных сопоставлений (требуют проверки)
         self.potential_match_threshold = 0.80  # Сопоставления между 85% и 90% требуют проверки
@@ -551,22 +559,92 @@ estonian_nlp = EstonianProductNLP()
 
 # Function to save matches to Excel file
 def save_potential_matches_to_file(first_product, second_product, score, metrics):
-    """Saves information about potential matches to an Excel file"""
+    """Saves information about potential matches to an Excel file with normalized values"""
     try:
         filepath = "potential_matches.xlsx"
         
-        # Create data for writing
+        # Нормализуем все текстовые значения перед сохранением
+        def normalize_if_str(val):
+            return normalize_string(val) if isinstance(val, str) else val
+        
+        # Нормализуем списки
+        def normalize_list(lst):
+            if isinstance(lst, list):
+                return [normalize_if_str(item) for item in lst]
+            else:
+                return lst
+        
+        # Находим различающиеся слова
+        different_words1 = set(metrics.get('first_main_words', [])) - set(metrics.get('second_main_words', []))
+        different_words2 = set(metrics.get('second_main_words', [])) - set(metrics.get('first_main_words', []))
+        
+        # Проверяем наличие вкусовых маркеров в различающихся словах
+        taste_markers = estonian_nlp.taste_markers if hasattr(estonian_nlp, 'taste_markers') else []
+        flavor_diff1 = []
+        for word in different_words1:
+            word_lower = word.lower()
+            for marker in taste_markers:
+                if (marker in word_lower and len(word) > len(marker) + 1) or word_lower in taste_markers:
+                    flavor_diff1.append(word)
+                    break
+        
+        flavor_diff2 = []
+        for word in different_words2:
+            word_lower = word.lower()
+            for marker in taste_markers:
+                if (marker in word_lower and len(word) > len(marker) + 1) or word_lower in taste_markers:
+                    flavor_diff2.append(word)
+                    break
+        
+        # Проверка на снижение оценки из-за разных составов слов
+        has_word_penalty = False
+        word_penalty_reason = ""
+        if (different_words1 and different_words2 and 
+            len(different_words1) >= 2 and len(different_words2) >= 2):
+            has_word_penalty = True
+            word_penalty_reason = "разные составы ключевых слов"
+        
+        # Проверка на снижение оценки из-за вкусовых различий
+        flavor_penalty = False
+        if flavor_diff1 or flavor_diff2:
+            flavor_penalty = True
+        
+        # Рассчитываем скорректированную оценку для проверки
+        raw_score = (metrics.get('word_similarity', 0) * 0.44 + 
+                    metrics.get('attribute_score', 0) * 0.22 + 
+                    metrics.get('unique_words_score', 0) * 0.44)
+        
+        # Оценка со снижением
+        adjusted_score = raw_score
+        if has_word_penalty:
+            adjusted_score *= 0.7
+        
+        if flavor_penalty:
+            adjusted_score *= 0.5  # Увеличенный штраф за различия во вкусе
+        
+        # Create data for writing with normalized values and extra info
         data = {
-            'First Product': [first_product],
-            'Second Product': [second_product],
+            'First Product': [normalize_if_str(first_product)],
+            'Second Product': [normalize_if_str(second_product)],
             'Score': [f"{score:.1f}%"],
+            'Raw Score': [f"{raw_score:.1f}%"],
             'Word Similarity': [f"{metrics.get('word_similarity', 0):.1f}%"],
             'Attribute Score': [f"{metrics.get('attribute_score', 0):.1f}%"],
             'Unique Words Score': [f"{metrics.get('unique_words_score', 0):.1f}%"],
-            'First Main Words': [str(metrics.get('first_main_words', []))],
-            'Second Main Words': [str(metrics.get('second_main_words', []))],
-            'First Attributes': [str(metrics.get('first_attributes', []))],
-            'Second Attributes': [str(metrics.get('second_attributes', []))],
+            'First Main Words': [str(normalize_list(metrics.get('first_main_words', [])))],
+            'Second Main Words': [str(normalize_list(metrics.get('second_main_words', [])))],
+            'First Attributes': [str(normalize_list(metrics.get('first_attributes', [])))],
+            'Second Attributes': [str(normalize_list(metrics.get('second_attributes', [])))],
+            'Different Words First': [str(list(different_words1))],
+            'Different Words Second': [str(list(different_words2))],
+            'Flavor Differences First': [str(flavor_diff1)],
+            'Flavor Differences Second': [str(flavor_diff2)],
+            'Has Word Penalty': [str(has_word_penalty)],  # Используем str() вместо прямого булева значения
+            'Word Penalty Reason': [word_penalty_reason],
+            'Has Flavor Penalty': [str(flavor_penalty)],  # Используем str() вместо прямого булева значения
+            'Raw Score': [f"{raw_score:.1f}%"],
+            'Adjusted Score': [f"{adjusted_score:.1f}%"],
+            'Taste Markers Detected': [str([m for m in taste_markers if m in first_product.lower() or m in second_product.lower()])],
             'Timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
         }
         
@@ -575,29 +653,35 @@ def save_potential_matches_to_file(first_product, second_product, score, metrics
         
         sheet_name = "Matches"
         
-        # If file exists, load it and add new data
-        if os.path.isfile(filepath):
-            try:
-                # Check if "Matches" sheet exists in the file
+        try:
+            # Проверяем, существует ли файл и не поврежден ли он
+            if os.path.isfile(filepath):
                 try:
+                    # Пытаемся прочитать существующий файл
                     existing_df = pd.read_excel(filepath, sheet_name=sheet_name)
-                    # If sheet exists, add data
-                    with pd.ExcelWriter(filepath, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
-                        df.to_excel(writer, index=False, header=False, startrow=len(existing_df) + 1, sheet_name=sheet_name)
-                except ValueError as ve:
-                    # If "Matches" sheet is not found, create a new sheet
-                    with pd.ExcelWriter(filepath, mode='a', engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False, sheet_name=sheet_name)
-            except Exception as e:
-                logger.error(f"Error adding to existing Excel file: {str(e)}")
-                # If failed to add to existing file, overwrite the file
-                df.to_excel(filepath, index=False, engine='openpyxl', sheet_name=sheet_name)
-        else:
-            # If file doesn't exist, create a new one
-            df.to_excel(filepath, index=False, engine='openpyxl', sheet_name=sheet_name)
-        
-        logger.debug(f"Match data successfully saved to {filepath}")
-        
+                    
+                    # Если успешно прочитали, добавляем новые данные
+                    # Используем .append() вместо ExcelWriter для большей надежности
+                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                    
+                    # Записываем объединенный DataFrame
+                    combined_df.to_excel(filepath, index=False, sheet_name=sheet_name)
+                except Exception as e:
+                    logger.warning(f"Could not read existing Excel file, creating new: {str(e)}")
+                    # При любой ошибке создаем новый файл
+                    df.to_excel(filepath, index=False, sheet_name=sheet_name)
+            else:
+                # Файл не существует, создаем новый
+                df.to_excel(filepath, index=False, sheet_name=sheet_name)
+                
+            logger.debug(f"Match data successfully saved to {filepath}")
+                
+        except Exception as e:
+            # При любой ошибке создаем файл с временной меткой
+            new_filepath = f"potential_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            logger.warning(f"Failed to write to {filepath}, creating new file {new_filepath}: {str(e)}")
+            df.to_excel(new_filepath, index=False, sheet_name=sheet_name)
+            
     except Exception as e:
         logger.error(f"Error saving matches to Excel file: {str(e)}")
 
@@ -688,7 +772,6 @@ def run_matching(db_session):
         created_count = 0
 
         category_thresholds = {}
-        brand_thresholds = {}
         
         existing_products = db_session.query(ProductStoreData).filter(ProductStoreData.product_id.isnot(None)).all()
         for product in existing_products:
@@ -697,24 +780,15 @@ def run_matching(db_session):
                 if product_category not in category_thresholds:
                     category_thresholds[product_category] = {'count': 0, 'threshold': 75.0}
                 category_thresholds[product_category]['count'] += 1
-            
-            brand = getBrand(product.store_product_name) if product.store_product_name else None
-            if brand:
-                if brand not in brand_thresholds:
-                    brand_thresholds[brand] = {'count': 0, 'threshold': 75.0}
-                brand_thresholds[brand]['count'] += 1
-        
-        # Adjust threshold based on brand frequency
-        for brand, data in brand_thresholds.items():
-            if data['count'] > 20:
-                brand_thresholds[brand]['threshold'] = 80.0
-            elif data['count'] > 10:
-                brand_thresholds[brand]['threshold'] = 77.0
         
         # Adjust threshold based on category frequency
         for category_id, data in category_thresholds.items():
-            if data['count'] > 30:
-                category_thresholds[category_id]['threshold'] = 78.0
+            if data['count'] > 50:
+                category_thresholds[category_id]['threshold'] = 85.0
+            elif data['count'] > 30:
+                category_thresholds[category_id]['threshold'] = 83.0
+            else:
+                category_thresholds[category_id]['threshold'] = 80.0
         
         match_metrics = {
             "total_processed": 0,
@@ -789,7 +863,7 @@ def run_matching(db_session):
                     second_candidate.store_product_name
                 )
                 
-                # For metadata, get brand separately, only when needed
+                # Для метаданных сохраняем только извлеченные признаки
                 if nlp_similarity > best_score:
                     best_match = second_candidate
                     best_score = nlp_similarity
@@ -821,18 +895,15 @@ def run_matching(db_session):
                         best_metrics
                     )
             
-            match_threshold = 90.0
+            match_threshold = 85.0
             
             product_category = getattr(first_candidate, "category_id", None)
             if product_category and product_category in category_thresholds:
-                match_threshold = max(category_thresholds[product_category]['threshold'], 90.0)
+                match_threshold = max(category_thresholds[product_category]['threshold'], 85.0)
             
-            if best_match and best_score >= 90.0:
-                # Get brand only when needed for metadata
-                brand = getBrand(first_candidate.store_product_name)
-                
+            if best_match and best_score >= match_threshold:
+                # Сохраняем только основную информацию без getBrand
                 nlp_features = {
-                    "brand": brand,
                     "main_words": first_main_words,
                     "attributes": first_attributes
                 }
@@ -871,10 +942,10 @@ def run_matching(db_session):
                 db_session.commit()
 
             match_metrics["total_processed"] += 1
-            if best_score >= 80.0:
+            if best_score >= 75.0:
                 match_metrics["high_confidence_matches"] += 1
                 match_metrics["confidence_scores"].append(best_score)
-            elif best_score >= 75.0:
+            elif best_score >= 70.0:
                 match_metrics["medium_confidence_matches"] += 1
                 match_metrics["confidence_scores"].append(best_score) 
             elif best_score >= 50.0:
