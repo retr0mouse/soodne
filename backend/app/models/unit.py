@@ -9,8 +9,6 @@ class Unit(Base):
     unit_id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), unique=True, nullable=False)
     conversion_factor = Column(DECIMAL(10, 6), nullable=False)
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())
 
     products = relationship("Product", back_populates="unit")
     product_store_data = relationship("ProductStoreData", back_populates="store_unit")

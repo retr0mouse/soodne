@@ -1,121 +1,136 @@
-import logging
-from typing import Tuple
-import numpy as np
-import torch
-from PIL import Image
-from sentence_transformers import SentenceTransformer
-from torchvision import models as torchvision_models
-from torchvision.models import ResNet18_Weights
-from torchvision import transforms
-from rapidfuzz import fuzz
-import requests
-from io import BytesIO
+from datetime import timedelta
 import re
+from sqlalchemy import func, or_
+from app.core.logger import setup_logger
+from app.models.product_store_data import ProductStoreData
+from app import schemas
+from app.services import product_service
+from app.utils.brands import getBrand
 
-from app import models, schemas
-from app.database.database import SessionLocal
-from app.services import product_matching_log_service
+logger = setup_logger("app.ai.matcher")
 
-logger = logging.getLogger(__name__)
 
-sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-image_model = torchvision_models.resnet18(weights=ResNet18_Weights.DEFAULT)
-image_model.eval()
-
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
-])
-
-def preprocess_name(name: str) -> str:
-    name = re.sub(r'[^\w\s]', '', name)
-    name = name.lower()
-    return name
-
-def get_image_embedding(url: str) -> np.ndarray:
+def run_matching(db_session):
+    """Run matching based on weight and title similarity"""
     try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content)).convert('RGB')
-        image = preprocess(image)
-        image = image.unsqueeze(0)
-        with torch.no_grad():
-            embedding = image_model(image).numpy().flatten()
-        return embedding
+        logger.info("Starting product matching")
+
+        # Get unmatched products (same query as before)
+        # unmatched_products = db_session.query(ProductStoreData).filter(
+        #     ProductStoreData.product_id.is_(None),
+        #     ProductStoreData.store_product_name.isnot(None)
+        # ).order_by(func.random()).all()
+
+        # For now let's check all products
+        unmatched_products = db_session.query(ProductStoreData).all()
+
+        if not unmatched_products:
+            logger.info("No unmatched products found")
+            return
+
+        logger.info(f"Found {len(unmatched_products)} unmatched products")
+
+        matched_count = 0
+        created_count = 0
+
+        for first_candidate in unmatched_products:
+            if not first_candidate.store_product_name or "SKIP" in first_candidate.store_product_name:
+                continue
+
+            # Find candidates with similar names using trigram similarity
+            similar_products = db_session.query(ProductStoreData).filter(
+                ProductStoreData.store_id != first_candidate.store_id,
+                func.similarity(ProductStoreData.store_product_name, first_candidate.store_product_name) > 0.3
+            ).order_by(
+                func.similarity(ProductStoreData.store_product_name, first_candidate.store_product_name).desc()
+            ).limit(20).all()
+
+            # Normalize name
+            first_candidate_name = first_candidate.store_product_name.lower()
+            first_brand = getBrand(first_candidate_name)
+            first_candidate_name = re.sub(r"\s+", " ", first_candidate_name)
+            first_candidate_name = re.sub(r"[^\w\s]", "", first_candidate_name)
+            first_candidate_name = first_candidate_name.replace(first_brand, '') if first_brand else first_candidate_name
+            best_match = None
+            best_score = 0.0
+
+            for second_candidate in similar_products:
+                # Normalize name
+                second_candidate_name = second_candidate.store_product_name.lower()
+                second_brand = getBrand(second_candidate_name)
+                second_candidate_name = re.sub(r"\s+", " ", second_candidate_name)
+                second_candidate_name = re.sub(r"[^\w\s]", "", second_candidate_name)
+                second_candidate_name = second_candidate_name.replace(second_brand, '') if second_brand else second_candidate_name
+
+                if first_brand != second_brand:
+                    continue
+
+                # Convert SQL Decimal to Python float first
+                name_similarity = float(
+                    db_session.query(
+                        func.similarity(first_candidate_name, second_candidate_name)
+                    ).scalar()
+                )
+
+                # Calculate weight similarity
+                if first_candidate.store_weight_value and second_candidate.store_weight_value:
+                    weight_diff = abs(float(second_candidate.store_weight_value) - float(first_candidate.store_weight_value))
+                    weight_similarity = 1 - (weight_diff / max(float(first_candidate.store_weight_value), 0.0001))
+                else:
+                    weight_similarity = 0.0
+
+                # Now combine as floats
+                total_score = (name_similarity * 0.5 + weight_similarity * 0.5) * 100
+
+                if total_score > best_score:
+                    best_match = second_candidate
+                    best_score = total_score
+
+            if best_match and best_score >= 75.0:  # Adjusted threshold
+                logger.info(f"Match found for {first_candidate.store_product_name} and {best_match.store_product_name} with score {best_score:.1f}%")
+
+                if best_match.product_id is not None:
+                    # logger.info(f"Match already has a record in product: {best_match.store_product_name}")
+                    first_candidate.product_id = best_match.product_id
+                else:
+                    # logger.info(f"Creating new product from match for {first_candidate.store_product_name}")
+
+                    new_product = product_service.create(db_session, schemas.ProductCreate(
+                        name=first_candidate.store_product_name,
+                        weight_value=first_candidate.store_weight_value,
+                        unit_id=first_candidate.store_unit_id
+                    ))
+                    first_candidate.product_id = new_product.product_id
+                    created_count += 1
+
+                first_candidate.last_matched = func.now()
+                matched_count += 1
+                db_session.commit()
+
+            else:
+                # logger.info(f"No match found for {first_candidate.store_product_name}, creating new product")
+                new_product = product_service.create(db_session, schemas.ProductCreate(
+                    name=first_candidate.store_product_name,
+                    weight_value=first_candidate.store_weight_value,
+                    unit_id=first_candidate.store_unit_id
+                ))
+                first_candidate.product_id = new_product.product_id
+                first_candidate.last_matched = func.now()
+                created_count += 1
+                db_session.commit()
+
+        logger.info(f"""Matching completed:
+            - Matched: {matched_count} products
+            - Created new: {created_count} products
+            - Success rate: {((matched_count + created_count) / len(unmatched_products) * 100):.1f}%""")
+
+        return {
+            "matched": matched_count,
+            "created": created_count
+        }
+
     except Exception as e:
-        logger.error(f"Error processing image from URL {url}: {e}")
-        return np.zeros(512)
+        logger.error(f"Error during matching process: {str(e)}", exc_info=True)
+        db_session.rollback()
+        raise
 
-def compare_weight(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> float:
-    if not psd1.store_weight_value or not psd2.store_weight_value:
-        return 0
-    try:
-        weight1 = float(psd1.store_weight_value)
-        weight2 = float(psd2.store_weight_value)
-        tolerance = 0.05
-        return 100 if abs(weight1 - weight2) / max(weight1, weight2) <= tolerance else 0
-    except Exception as e:
-        logger.error(f"Error comparing weights: {e}")
-        return 0
-
-def match_products(psd1: models.ProductStoreData, psd2: models.ProductStoreData) -> Tuple[bool, float]:
-    name1 = preprocess_name(psd1.store_product_name)
-    name2 = preprocess_name(psd2.store_product_name)
-
-    name_embedding1 = sentence_model.encode(name1)
-    name_embedding2 = sentence_model.encode(name2)
-    cosine_sim = np.dot(name_embedding1, name_embedding2) / (
-            np.linalg.norm(name_embedding1) * np.linalg.norm(name_embedding2)
-    )
-    name_similarity = cosine_sim * 100
-
-    fuzzy_similarity = fuzz.token_set_ratio(name1, name2)
-
-    combined_name_similarity = (name_similarity * 0.7) + (fuzzy_similarity * 0.3)
-
-    weight_match = compare_weight(psd1, psd2)
-
-    image_embedding1 = get_image_embedding(psd1.store_image_url)
-    image_embedding2 = get_image_embedding(psd2.store_image_url)
-    if np.linalg.norm(image_embedding1) == 0 or np.linalg.norm(image_embedding2) == 0:
-        image_similarity = 0
-    else:
-        image_cosine_sim = np.dot(image_embedding1, image_embedding2) / (
-                np.linalg.norm(image_embedding1) * np.linalg.norm(image_embedding2)
-        )
-        image_similarity = image_cosine_sim * 100
-
-    total_score = (combined_name_similarity * 0.6) + (weight_match * 0.3) + (image_similarity * 0.1)
-    matched = total_score > 80
-
-    return matched, round(total_score, 2)
-
-def run_ai_matching():
-    with SessionLocal() as db:
-        unmatched_psds = db.query(models.ProductStoreData).filter(
-            models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
-        ).all()
-        for psd in unmatched_psds:
-            similar_psds = db.query(models.ProductStoreData).filter(
-                models.ProductStoreData.store_id != psd.store_id,
-                models.ProductStoreData.matching_status == schemas.MatchingStatusEnum.unmatched
-            ).all()
-            for similar_psd in similar_psds:
-                matched, confidence = match_products(psd, similar_psd)
-                if matched:
-                    psd.matching_status = schemas.MatchingStatusEnum.matched
-                    similar_psd.matching_status = schemas.MatchingStatusEnum.matched
-                    log = schemas.ProductMatchingLogCreate(
-                        product_store_id=psd.product_store_id,
-                        product_id=similar_psd.product_id,
-                        confidence_score=confidence,
-                        matched_by="ai_matcher"
-                    )
-                    product_matching_log_service.create(db, log=log)
-                    db.commit()
-                    break
