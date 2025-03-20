@@ -45,12 +45,12 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
-            "Barbora": "https://barbora.ee",
-            "Rimi": "https://www.rimi.ee/epood/ee",
+            # "Barbora": "https://barbora.ee",
+            # "Rimi": "https://www.rimi.ee/epood/ee",
             "Selver": "https://www.selver.ee",
             "Prisma": "https://www.prismamarket.ee"
         }
-        
+
         for store_name, url in stores.items():
             try:
                 logger.info(f"Processing store: {store_name}")
@@ -656,56 +656,57 @@ def get_conversion_factor(unit_name):
 def get_all_selver_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Selver categories...")
     categories = get_selver_categories(headers, user_agent)
-    logger.info(f"Found {len(categories)} Selver categories")
-    
+
     for category_index, category in enumerate(categories, 1):
         logger.info(f"Processing Selver category {category_index}/{len(categories)}: {category['name']}")
-        if not category['url_path']:
-            logger.warning(f"Skipping category {category['name']} - no URL path available")
-            continue
-            
+
         category_items = get_selver_items_by_category(category, headers, user_agent)
         logger.info(f"Found {len(category_items)} items in category {category['name']}")
-        
+
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
 
 def get_selver_categories(headers, user_agent):
     try:
-        categories_api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/category/_search?from=0&request=%7B%22query%22%3A%7B%22bool%22%3A%7B%22filter%22%3A%7B%22bool%22%3A%7B%22must%22%3A%5B%7B%22terms%22%3A%7B%22id%22%3A%5B3%5D%7D%7D%2C%7B%22terms%22%3A%7B%22is_active%22%3A%5Btrue%5D%7D%7D%5D%7D%7D%7D%7D%7D&size=4000&sort=position%3Aasc"
+        categories_api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/category/_search?q=parent_id:3%20AND%20-_exists_:display_mode&_source_include=name,id,children_data,url_path&size=1000"
         logger.debug(f"Requesting Selver categories from: {categories_api_url}")
         
         response = requests.get(categories_api_url, headers=headers)
         response.raise_for_status()
         
         data = response.json()
-        main_categories = []
+        categories = []
+
         
         if 'hits' in data and 'hits' in data['hits']:
             for hit in data['hits']['hits']:
-                source = hit.get('_source', {})
-                
-                # Skip categories with include_in_menu=0 or any system categories
-                if not source.get('include_in_menu', 0) or not source.get('is_active', False):
-                    continue
-                
-                # Get only level 3 categories (main categories)
-                if source.get('level') == 3:
-                    category = {
-                        'id': source.get('id'),
-                        'name': source.get('name'),
-                        'url_path': source.get('url_path'),
-                        'product_count': source.get('product_count', 0)
-                    }
-                    main_categories.append(category)
-                    logger.debug(f"Added main category: {category['name']} with URL path: {category['url_path']}")
+                current_category = hit['_source']
+
+                category = {
+                    'name': current_category.get('name'),
+                    'url_path': current_category.get('url_path'),
+                    'id': current_category.get('id'),
+                    'all_categories': getSubcategories(current_category)
+                }
+                categories.append(category)
+                logger.debug(f"Added category: {category['name']} with URL path: {category['url_path']}")
         
-        logger.info(f"Found {len(main_categories)} main categories from Selver")
-        return main_categories
+        logger.info(f"Found {len(categories)} categories from Selver")
+        return categories
     except Exception as e:
         logger.error(f"Error getting Selver categories: {str(e)}", exc_info=True)
         return []
+
+
+# returns an array containing parent category and all subcategory ids
+def getSubcategories(category):
+    category_ids = [category['id']]
+
+    if category['children_data']:
+        for child in category['children_data']:
+            category_ids.extend(getSubcategories(child))
+    return category_ids
 
 @retry(
     stop=stop_after_attempt(3),
@@ -713,18 +714,28 @@ def get_selver_categories(headers, user_agent):
 )
 def get_selver_items_by_category(category, headers, user_agent):
     result_products = []
-    page = 1
-    page_size = 1000  # Set a large page size to get all products at once
     
     try:
-        category_id = category['id']
-        # Format the API URL to query products by category_id
-        api_url = f"https://www.selver.ee/api/catalog/vue_storefront_catalog_et/product/_search?_source_exclude=configurable_options%2Cproduct_nutr_info%2Cproduct_nutr_unit%2Cproduct_nutr_energy%2Cproduct_nutr_fats%2Cproduct_nutr_fats_acids%2Cproduct_nutr_carbohydrates%2Cproduct_nutr_sugars%2Cproduct_nutr_proteins%2Cproduct_nutr_salt%2Csgn%2C%2A.sgn%2Cmsrp_display_actual_price_type%2C%2A.msrp_display_actual_price_type%2Crequired_options&_source_include=documents%2Cactivity%2Cconfigurable_children.attributes%2Cconfigurable_children.id%2Cconfigurable_children.final_price%2Cconfigurable_children.color%2Cconfigurable_children.original_price%2Cconfigurable_children.original_price_incl_tax%2Cconfigurable_children.price%2Cconfigurable_children.price_incl_tax%2Cconfigurable_children.size%2Cconfigurable_children.sku%2Cconfigurable_children.special_price%2Cconfigurable_children.special_price_incl_tax%2Cconfigurable_children.tier_prices%2Cfinal_price%2Cid%2Cimage%2Cname%2Cnew%2Coriginal_price_incl_tax%2Coriginal_price%2Cprice%2Cprice_incl_tax%2Cproduct_links%2Csale%2Cspecial_price%2Cspecial_to_date%2Cspecial_from_date%2Cspecial_price_incl_tax%2Cstatus%2Ctax_class_id%2Ctier_prices%2Ctype_id%2Curl_path%2Curl_key%2C%2Aimage%2C%2Asku%2C%2Asmall_image%2Cshort_description%2Cmanufacturer%2Cproduct_%2A%2Cextension_attributes.deposit_data%2Cstock%2Cproduct_stocktype%2Cproduct_stocksource%2Cprices%2Cvmo_badges%2Cproduct_nutr_energy_kcal&from=0&request=%7B%22query%22%3A%7B%22bool%22%3A%7B%22filter%22%3A%7B%22bool%22%3A%7B%22must%22%3A%5B%7B%22terms%22%3A%7B%22visibility%22%3A%5B2%2C3%2C4%5D%7D%7D%2C%7B%22terms%22%3A%7B%22status%22%3A%5B0%2C1%5D%7D%7D%2C%7B%22terms%22%3A%7B%22category_ids%22%3A%5B{category_id}%5D%7D%7D%5D%7D%7D%7D%7D%7D&size={page_size}&sort=position%3Aasc"
+        api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/product/_search"
+        payload = {
+            "_source": ["name", "prices", "media_gallery", "product_volume"],
+            "query": {
+                "bool": {
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"terms": {"category_ids": category['all_categories']}}
+                            ]
+                        }
+                    }
+                }
+            },
+            "size": 10000
+        }
+
+        logger.debug(f"Requesting Selver products from API for category: {category['name']} (ID: {category['id']})")
         
-        logger.debug(f"Requesting Selver products from API for category: {category['name']} (ID: {category_id})")
-        
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
+        response = requests.post(api_url, json=payload, headers=headers)
         
         data = response.json()
         
@@ -734,34 +745,13 @@ def get_selver_items_by_category(category, headers, user_agent):
             
             for product in products_data:
                 try:
-                    source = product.get('_source', {})
-                    
-                    # Skip products that are not active
-                    if source.get('status') != 1:
-                        continue
-                    
-                    name = source.get('name')
-                    if not name:
-                        continue
-                    
-                    # Extract price from prices array (prefer customer_group_id 0 which is the default)
-                    price = source.get('price', 0)
-                    for price_item in source.get('prices', []):
-                        if price_item.get('customer_group_id') == 0:
-                            price = price_item.get('final_price')
-                            break
-                    
-                    # Get image URL
-                    image_path = source.get('image')
+                    current_product = product.get('_source')
+                    name = current_product.get('name')
+                    price = current_product['prices'][0]['final_price']
+                    image_path = current_product['media_gallery'][0]['image']
                     image_url = f"https://www.selver.ee/img/800/800/resize{image_path}" if image_path else None
-                    
-                    # Extract weight and unit from product name or volume field
-                    weight_value, unit_name = parse_product_details(name)
-                    
-                    # If no weight/unit found, try from product_volume field
-                    if (not weight_value or not unit_name) and source.get('product_volume'):
-                        weight_value, unit_name = parse_product_details(source.get('product_volume'))
-                    
+                    weight_value, unit_name = parse_product_details(current_product['product_volume'])
+
                     # Create product data
                     result_products.append({
                         'name': name,
