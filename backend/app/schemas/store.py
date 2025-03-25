@@ -1,6 +1,5 @@
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
 
 class StoreBase(BaseModel):
     name: str
@@ -12,8 +11,6 @@ class StoreCreate(StoreBase):
 
 class Store(StoreBase):
     store_id: int
-    created_at: datetime
-    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

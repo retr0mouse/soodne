@@ -10,7 +10,5 @@ class Store(Base):
     name = Column(String(255), unique=True, nullable=False)
     website_url = Column(Text)
     image_url = Column(Text)
-    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at = Column(TIMESTAMP(timezone=True), onupdate=func.now())
 
     product_store_data = relationship("ProductStoreData", back_populates="store")
