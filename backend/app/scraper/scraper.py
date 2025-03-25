@@ -26,6 +26,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoS
 from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
+import uuid
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -46,10 +47,12 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
+            "Barbora": "https://barbora.ee",
             "Rimi": "https://www.rimi.ee/epood/ee",
-            "Barbora": "https://barbora.ee"
+            "Selver": "https://www.selver.ee",
+            "Prisma": "https://www.prismamarket.ee"
         }
-        
+
         for store_name, url in stores.items():
             try:
                 logger.info(f"Processing store: {store_name}")
@@ -93,6 +96,14 @@ def process_store(db: Session, store):
             logger.info("Starting Rimi scraping...")
             get_all_rimi_items(db, store, headers, user_agent)
             logger.info("Finished Rimi scraping")
+        case 'Selver':
+            logger.info("Starting Selver scraping...")
+            get_all_selver_items(db, store, headers, user_agent)
+            logger.info("Finished Selver scraping")
+        case 'Prisma':
+            logger.info("Starting Prisma scraping...")
+            get_all_prisma_items(db, store, headers, user_agent)
+            logger.info("Finished Prisma scraping")
         case _:
             logger.info(f"No scraper for store {store} is implemented")
 
@@ -788,6 +799,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
                     '''
                 ]
                 
+
                 # Try each extraction method
                 for method_index, method in enumerate(extraction_methods):
                     try:
@@ -983,3 +995,261 @@ def get_conversion_factor(unit_name):
         'l': 1000,
     }
     return unit_conversions.get(unit_name, 1)
+
+def get_all_selver_items(db: Session, store, headers, user_agent):
+    logger.info("Fetching Selver categories...")
+    categories = get_selver_categories(headers, user_agent)
+
+    for category_index, category in enumerate(categories, 1):
+        logger.info(f"Processing Selver category {category_index}/{len(categories)}: {category['name']}")
+
+        category_items = get_selver_items_by_category(category, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category['name']}")
+
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            process_item(db, store, item)
+
+def get_selver_categories(headers, user_agent):
+    try:
+        categories_api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/category/_search?q=parent_id:3%20AND%20-_exists_:display_mode&_source_include=name,id,children_data,url_path&size=1000"
+        logger.debug(f"Requesting Selver categories from: {categories_api_url}")
+
+        response = requests.get(categories_api_url, headers=headers)
+        response.raise_for_status()
+        
+        data = response.json()
+        categories = []
+
+        
+        if 'hits' in data and 'hits' in data['hits']:
+            for hit in data['hits']['hits']:
+                current_category = hit['_source']
+
+                category = {
+                    'name': current_category.get('name'),
+                    'url_path': current_category.get('url_path'),
+                    'id': current_category.get('id'),
+                    'all_categories': getSubcategories(current_category)
+                }
+                categories.append(category)
+                logger.debug(f"Added category: {category['name']} with URL path: {category['url_path']}")
+        
+        logger.info(f"Found {len(categories)} categories from Selver")
+        return categories
+    except Exception as e:
+        logger.error(f"Error getting Selver categories: {str(e)}", exc_info=True)
+        return []
+
+
+# returns an array containing parent category and all subcategory ids
+def getSubcategories(category):
+    category_ids = [category['id']]
+
+    if category['children_data']:
+        for child in category['children_data']:
+            category_ids.extend(getSubcategories(child))
+    return category_ids
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10)
+)
+def get_selver_items_by_category(category, headers, user_agent):
+    result_products = []
+    
+    try:
+        api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/product/_search"
+        payload = {
+            "_source": ["name", "prices", "media_gallery", "product_volume"],
+            "query": {
+                "bool": {
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"terms": {"category_ids": category['all_categories']}}
+                            ]
+                        }
+                    }
+                }
+            },
+            "size": 10000
+        }
+
+        logger.debug(f"Requesting Selver products from API for category: {category['name']} (ID: {category['id']})")
+        
+        response = requests.post(api_url, json=payload, headers=headers)
+        
+        data = response.json()
+        
+        if 'hits' in data and 'hits' in data['hits']:
+            products_data = data['hits']['hits']
+            logger.debug(f"Found {len(products_data)} products from API for category: {category['name']}")
+            
+            for product in products_data:
+                try:
+                    current_product = product.get('_source')
+                    name = current_product.get('name')
+                    price = current_product['prices'][0]['final_price']
+                    image_path = current_product['media_gallery'][0]['image']
+                    image_url = f"https://www.selver.ee/img/800/800/resize{image_path}" if image_path else None
+                    weight_value, unit_name = parse_product_details(current_product['product_volume'])
+
+                    # Create product data
+                    result_products.append({
+                        'name': name,
+                        'price': price,
+                        'image': image_url,
+                        'weight_value': weight_value,
+                        'unit_name': unit_name
+                    })
+                    
+                    logger.debug(f"""
+                        Processing raw item data:
+                        - Name: {name}
+                        - Price: {price}
+                        - Image: {image_url}
+                        - Weight Value: {weight_value}
+                        - Unit Name: {unit_name}
+                    """)
+                    
+                except Exception as e:
+                    logger.warning(f"Error parsing product: {str(e)}")
+                    continue
+        
+    except Exception as e:
+        logger.error(f"Error fetching products from Selver API: {str(e)}", exc_info=True)
+    
+    logger.debug(f"Final total products collected for category {category['name']}: {len(result_products)}")
+    return result_products
+
+def get_all_prisma_items(db: Session, store, headers, user_agent):
+    logger.info("Fetching Prisma categories...")
+    categories = get_prisma_categories(headers, user_agent)
+    logger.info(f"Found {len(categories)} Prisma categories")
+    
+    for category_index, category in enumerate(categories, 1):
+        logger.info(f"Processing Prisma category {category_index}/{len(categories)}: {category['name']}")
+        category_items = get_prisma_items_by_category(category, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category['name']}")
+        
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            process_item(db, store, item)
+
+def get_prisma_categories(headers, user_agent):
+    try:
+        base_url = "https://graphql-api.prismamarket.ee"
+        body = {
+            "operationName": "RemoteNavigation",
+            "variables": {
+                "id":"542860184"
+            },
+            "extensions": {
+                "persistedQuery": {
+                    "version":1,
+                    "sha256Hash": "707a9c68de67bcde9992a5d135e696c61d48abe1a9c765ca73ecf07bd80c513f"
+                }
+            }
+        }
+        logger.debug(f"Requesting Prisma categories")
+
+        response = requests.post(base_url, json=body, headers=headers)
+        response.raise_for_status()
+
+        data = response.json()
+        categories = []
+
+        if 'data' in data and 'store' in data['data'] and 'navigation' in data['data']['store']:
+            # skip the first 2 categories ("Aktuaalne", "Food Market")
+            data['data']['store']['navigation'].pop(0)
+            data['data']['store']['navigation'].pop(0)
+            for current_category in data['data']['store']['navigation']:
+                category = {
+                    'name': current_category.get('name'),
+                    'slug': current_category.get('slug'),
+                    'id': current_category.get('id')
+                }
+                categories.append(category)
+                logger.debug(f"Added category: {category['name']} ")
+
+        logger.info(f"Found {len(categories)} categories from Prisma")
+        return categories
+        
+    except Exception as e:
+        logger.error(f"Error getting Prisma categories: {str(e)}", exc_info=True)
+        return []
+
+def get_prisma_items_by_category(category, headers, user_agent):
+    result_products = []
+    
+    try:
+        offset = 0
+        while True:
+            base_url = "https://graphql-api.prismamarket.ee"
+            body = {
+                "operationName": "RemoteFilteredProducts",
+                "variables": {
+                    "includeAgeLimitedByAlcohol": True,
+                    "limit": 120,
+                    "from": offset,
+                    "queryString": "",
+                    "searchProvider": "loop54",
+                    "slug": category['slug'],
+                    "storeId": "542860184"
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": "86214929199d2277cbe0a8c138b2be4db7d5b32df8399bd3d266377ffc9c29b4"
+                    }
+                }
+            }
+
+            logger.debug(f"Requesting Prisma products from API for category: {category['name']} (ID: {category['id']}, SLUG: {category['slug']})")
+
+            response = requests.post(base_url, json=body, headers=headers)
+            response.raise_for_status()
+
+            data = response.json()
+            products = data['data']['store']['products']['items']
+            if len(products) > 0:
+                logger.debug(f"Found {len(products)} products from API for category: {category['name']}")
+
+                for product in products:
+                    try:
+                        name = product.get('name')
+                        price = product['price']
+                        image_url = (product['productDetails']['productImages']['mainImage']['urlTemplate']
+                                      .replace('/{MODIFIERS}', '')
+                                      .replace('{EXTENSION}', 'png'))
+                        weight_value, unit_name = parse_product_details(product['name'])
+
+                        # Create product data
+                        result_products.append({
+                            'name': name,
+                            'price': price,
+                            'image': image_url,
+                            'weight_value': weight_value,
+                            'unit_name': unit_name
+                        })
+
+                        logger.debug(f"""
+                                    Processing raw item data:
+                                    - Name: {name}
+                                    - Price: {price}
+                                    - Image: {image_url}
+                                    - Weight Value: {weight_value}
+                                    - Unit Name: {unit_name}
+                                """)
+                    except Exception as e:
+                        logger.warning(f"Error parsing product: {str(e)}")
+                        continue
+                offset = offset + 120
+            else:
+                break
+    except Exception as e:
+        logger.error(f"Error in get_prisma_items_by_category: {str(e)}", exc_info=True)
+    
+    logger.debug(f"Total products collected for category {category['name']}: {len(result_products)}")
+    return result_products
