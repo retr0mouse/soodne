@@ -481,11 +481,11 @@ def get_rimi_items_by_category(category, headers, user_agent):
                     );
                 
                     const jsonStr = targetScript.textContent
-                        .replace(/\s+/g, ' ')  // Collapse whitespace
-                        .match(/dataLayer\.push\(\s*({.*?})\s*\)/)[1]  // Capture JSON
-                        .replace(/'/g, '"')     // Standardize quotes
-                        .replace(/([{,])(\s*)([A-Za-z_]+)(\s*):/g, '$1"$3":')  // Fix keys
-                        .replace(/,\s*}/g, '}');  // Remove trailing commas
+                        .replace(/\s+/g, ' ')
+                        .match(/dataLayer\.push\(\s*({.*?})\s*\)/)[1]
+                        .replace(/'/g, '"')
+                        .replace(/([{,])(\s*)([A-Za-z_]+)(\s*):/g, '$1"$3":')
+                        .replace(/,\s*}/g, '}');
                 
                     return JSON.parse(jsonStr).ecommerce.impressions;
                 ''')
