@@ -3,7 +3,7 @@
 from .unit import Unit, UnitCreate
 from .store import Store, StoreCreate
 from .category import Category, CategoryCreate
-from .product import Product, ProductCreate
+from .product import Product, ProductCreate, ProductWithStoreData
 from .product_store_data import ProductStoreData, ProductStoreDataCreate
 from .product_price_history import ProductPriceHistory, ProductPriceHistoryCreate
 from .product_matching_log import ProductMatchingLog, ProductMatchingLogCreate
@@ -15,6 +15,7 @@ __all__ = [
     "Store", "StoreCreate",
     "Category", "CategoryCreate",
     "Product", "ProductCreate",
+    "ProductWithStoreData",
     "ProductStoreData", "ProductStoreDataCreate",
     "ProductPriceHistory", "ProductPriceHistoryCreate",
     "ProductMatchingLog", "ProductMatchingLogCreate",

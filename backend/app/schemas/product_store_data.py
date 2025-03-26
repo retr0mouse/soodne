@@ -1,20 +1,20 @@
 from pydantic import BaseModel
 from typing import Optional, Dict
 from datetime import datetime
-from .enums import MatchingStatusEnum
 
 class ProductStoreDataBase(BaseModel):
-    product_id: int
+    product_id: Optional[int] = None
     store_id: int
     price: float
     price_per_unit: Optional[float] = None
     store_product_name: Optional[str] = None
-    store_description: Optional[str] = None
-    store_image_url: Optional[str] = None
     store_weight_value: Optional[float] = None
+    store_image_url: Optional[str] = None
+    store_product_url: Optional[str] = None
+    store_category_id: Optional[int] = None
     store_unit_id: Optional[int] = None
+    ean: Optional[str] = None
     additional_attributes: Optional[Dict] = None
-    matching_status: Optional[MatchingStatusEnum] = MatchingStatusEnum.unmatched
     last_matched: Optional[datetime] = None
 
 class ProductStoreDataCreate(ProductStoreDataBase):

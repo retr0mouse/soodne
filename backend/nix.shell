@@ -1,0 +1,8 @@
+with import <nixpkgs> {};
+
+pkgs.mkShell {
+  buildInputs = [
+    python3
+    stdenv.cc.cc.lib
+  ];
+}

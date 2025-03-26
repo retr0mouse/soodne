@@ -13,15 +13,8 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE IF NOT EXISTS units (
     unit_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
-    conversion_factor DECIMAL(10, 6) NOT NULL,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+    conversion_factor DECIMAL(10, 6) NOT NULL
 );
-
-CREATE TRIGGER trg_update_units_updated_at
-BEFORE UPDATE ON units
-FOR EACH ROW
-EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE IF NOT EXISTS categories (
     category_id SERIAL PRIMARY KEY,
@@ -53,15 +46,8 @@ CREATE TABLE IF NOT EXISTS stores (
     store_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL UNIQUE,
     website_url TEXT,
-    image_url TEXT,
-    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+    image_url TEXT
 );
-
-CREATE TRIGGER trg_update_stores_updated_at
-BEFORE UPDATE ON stores
-FOR EACH ROW
-EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE IF NOT EXISTS products (
     product_id SERIAL PRIMARY KEY,
@@ -108,19 +94,19 @@ CREATE INDEX IF NOT EXISTS idx_products_fulltext
 
 CREATE TABLE IF NOT EXISTS product_store_data (
     product_store_id SERIAL PRIMARY KEY,
-    product_id INTEGER NOT NULL,
+    product_id INTEGER,
     store_id INTEGER NOT NULL,
     price DECIMAL(10, 2) NOT NULL CHECK (price >= 0),
     price_per_unit DECIMAL(10, 2) CHECK (price_per_unit >= 0),
     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     store_product_name VARCHAR(255),
-    store_description TEXT,
     store_image_url TEXT,
+    store_product_url TEXT,
+    store_category_id INTEGER,
     store_weight_value DECIMAL(10, 2) CHECK (store_weight_value >= 0),
     store_unit_id INTEGER,
     ean VARCHAR(13), 
     additional_attributes JSONB,
-    matching_status matching_status_enum DEFAULT 'unmatched',
     last_matched TIMESTAMP WITHOUT TIME ZONE,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
@@ -136,7 +122,12 @@ CREATE TABLE IF NOT EXISTS product_store_data (
             ON UPDATE CASCADE,
     CONSTRAINT fk_store_unit
         FOREIGN KEY (store_unit_id)
-            REFERENCES units (unit_id)
+            REFERENCES units (unit_id),
+    CONSTRAINT fk_store_category
+        FOREIGN KEY (store_category_id)
+            REFERENCES categories (category_id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE
 );
 
 CREATE TRIGGER trg_update_productstoredata_updated_at
@@ -163,19 +154,18 @@ CREATE INDEX IF NOT EXISTS idx_productstoredata_additional_attributes
     ON product_store_data
     USING GIN (additional_attributes);
 
-CREATE INDEX IF NOT EXISTS idx_productstoredata_matching_status
-    ON product_store_data (matching_status);
-
 CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_name_trgm
     ON product_store_data
     USING GIN (store_product_name gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS idx_productstoredata_store_description_trgm
-    ON product_store_data
-    USING GIN (store_description gin_trgm_ops);
-
 CREATE INDEX IF NOT EXISTS idx_productstoredata_ean
     ON product_store_data (ean);
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_url
+    ON product_store_data (store_product_url);
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_store_category_id
+    ON product_store_data (store_category_id);
 
 CREATE INDEX IF NOT EXISTS idx_stores_name
     ON stores (name);
@@ -196,14 +186,17 @@ EXECUTE PROCEDURE update_last_updated();
 CREATE OR REPLACE FUNCTION reset_matching_status()
 RETURNS TRIGGER AS $$
 BEGIN
-   IF NEW.store_product_name <> OLD.store_product_name
-       OR NEW.store_description <> OLD.store_description
-       OR NEW.store_image_url <> OLD.store_image_url
-       OR NEW.ean <> OLD.ean THEN
-       NEW.matching_status = 'unmatched';
-       NEW.product_id = NULL;
-   END IF;
-   RETURN NEW;
+    IF NEW.store_product_name <> OLD.store_product_name
+        OR NEW.store_image_url <> OLD.store_image_url
+        OR NEW.store_product_url <> OLD.store_product_url
+        OR NEW.store_category_id <> OLD.store_category_id
+        OR NEW.ean <> OLD.ean
+        OR NEW.store_weight_value <> OLD.store_weight_value
+        OR NEW.store_unit_id <> OLD.store_unit_id THEN
+        NEW.product_id = NULL;
+        NEW.last_matched = NULL;
+    END IF;
+    RETURN NEW;
 END;    
 $$ LANGUAGE plpgsql;
 
@@ -266,3 +259,11 @@ CREATE INDEX IF NOT EXISTS idx_product_matching_log_product_id
 
 CREATE INDEX IF NOT EXISTS idx_product_matching_log_confidence_score
     ON product_matching_log (confidence_score);
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_unmatched
+    ON product_store_data (product_id)
+    WHERE product_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_potential_matches
+    ON product_store_data (store_id, product_id)
+    WHERE product_id IS NOT NULL;

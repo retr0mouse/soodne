@@ -29,7 +29,7 @@ export default function Navbar() {
                     </label>
                     <ul tabIndex={0} className="menu menu-sm dropdown-content mt-3 z-[1] p-2 shadow bg-base-100 rounded-box w-52">
                         <li><a>Profile</a></li>
-                        <li><a>Settings</a></li>
+                        <li><Link href={"/settings"}>Settings</Link></li>
                         <li><a>Logout</a></li>
                     </ul>
                 </div>
