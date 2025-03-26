@@ -8,7 +8,8 @@ from app.services import (
     unit_service,
     product_service,
     product_store_data_service,
-    product_price_history_service
+    product_price_history_service,
+    category_service
 )
 from app.models.product_price_history import ProductPriceHistory
 import random
@@ -106,6 +107,151 @@ def process_store(db: Session, store):
             logger.info("Finished Prisma scraping")
         case _:
             logger.info(f"No scraper for store {store} is implemented")
+
+def process_category_path(db: Session, category_path_url):
+    """
+    Process category hierarchy from category_path_url.
+    Returns the leaf category (the most specific one).
+    """
+    if not category_path_url:
+        return None
+        
+    categories = category_path_url.split('/')
+    parent_id = None
+    last_category = None
+    
+    for cat_name in categories:
+        if not cat_name:
+            continue
+            
+        # Convert URL-friendly format to readable name
+        display_name = cat_name.replace('-', ' ').title()
+        
+        # Check if category exists
+        category = category_service.get_by_name(db, display_name)
+        
+        if not category:
+            # Create new category
+            category_data = schemas.CategoryCreate(
+                name=display_name,
+                parent_id=parent_id
+            )
+            category = category_service.create(db, category_data)
+            logger.debug(f"Created new category: {display_name} with parent_id: {parent_id}")
+        
+        # Set as parent for next iteration
+        parent_id = category.category_id
+        last_category = category
+    
+    return last_category
+
+def process_item(db: Session, store, item):
+    logger.debug(f"""
+    Processing raw item data:
+    - Name: {item['name']}
+    - Price: {item['price']}
+    - Image: {item['image']}
+    - Category: {item.get('category', 'N/A')}
+    - Weight Value: {item.get('weight_value', 'N/A')}
+    - Unit Name: {item.get('unit_name', 'N/A')}
+    - URL: {item.get('url', 'N/A')}
+    """)
+
+    weight_value = item.get('weight_value')
+    unit_name = item.get('unit_name')
+    
+    unit = None
+    if weight_value and unit_name:
+        unit = unit_service.get_by_name(db, name=unit_name)
+        if not unit:
+            unit_data = schemas.UnitCreate(
+                name=unit_name,
+                conversion_factor=get_conversion_factor(unit_name)
+            )
+            unit = unit_service.create(db, unit=unit_data)
+            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
+    
+    # Process category path if it exists
+    category = None
+    if 'category_path_url' in item and item['category_path_url']:
+        category = process_category_path(db, item['category_path_url'])
+        logger.debug(f"Processed category path: {item['category_path_url']} -> {category.name if category else None}")
+
+    # Create full product URL
+    product_url = None
+    if 'url' in item and item['url']:
+        # Make sure store URL doesn't have trailing slash
+        store_url = store.website_url.rstrip('/')
+        # Make sure product URL doesn't have leading slash
+        product_path = item['url'].lstrip('/')
+        
+        # For Barbora, ensure URL uses 'toode' format
+        if store.name == 'Barbora' and 'toode' not in product_path:
+            product_path = f"toode/{product_path}"
+            
+        product_url = f"{store_url}/{product_path}"
+        logger.debug(f"Created product URL: {product_url}")
+
+    # Create or update ProductStoreData entry
+    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
+        db,
+        store_product_name=item['name'],
+        store_id=store.store_id
+    )
+
+    psd_data = schemas.ProductStoreDataCreate(
+        product_id=None,  # Initially null, will be set by matcher
+        store_id=store.store_id,
+        price=item['price'],
+        store_product_name=item['name'],
+        store_weight_value=weight_value,
+        store_image_url=item['image'],
+        store_unit_id=unit.unit_id if unit else None,
+        store_category_id=category.category_id if category else None,
+        store_product_url=product_url
+    )
+
+    if existing_psd:
+        old_price = existing_psd.price
+        # If price has changed, save the old price to history
+        if float(old_price) != float(item['price']):
+            price_history = schemas.ProductPriceHistoryCreate(
+                product_store_id=existing_psd.product_store_id,
+                price=old_price
+            )
+            product_price_history_service.create(db, price_history)
+        
+        existing_psd.price = item['price']
+        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
+        # Update category if found
+        if category:
+            existing_psd.store_category_id = category.category_id
+        # Update product URL if available
+        if product_url:
+            existing_psd.store_product_url = product_url
+        db.commit()
+        logger.debug(f"""
+        Updated existing store data:
+        - Product: {item['name']}
+        - Old price: {old_price}
+        - New price: {item['price']}
+        - Last updated: {existing_psd.last_updated}
+        - Category: {category.name if category else None}
+        - Product URL: {product_url}
+        """)
+    else:
+        new_psd = product_store_data_service.create(db, psd=psd_data)
+        logger.debug(f"""
+        Created new store data:
+        - Product: {item['name']}
+        - Price: {item['price']}
+        - Store: {store.name}
+        - Product Store ID: {new_psd.product_store_id}
+        - Category: {category.name if category else None}
+        - Product URL: {product_url}
+        """)
+
+    logger.debug("=" * 50)
 
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
@@ -242,13 +388,17 @@ def get_barbora_items_by_category(category, headers, user_agent):
 
                         price = product['price']
                         image_url = product['image']
+                        category_path_url = product.get('category_path_url', None)
+                        url = product.get('Url', None)
 
                         result_products.append({
                             'name': name,
                             'price': price,
                             'image': image_url,
                             'weight_value': weight_value,
-                            'unit_name': unit_name
+                            'unit_name': unit_name,
+                            'category_path_url': category_path_url,
+                            'url': url
                         })
                         valid_products_count += 1
                         
@@ -332,6 +482,22 @@ def parse_product_details(name):
             break
     
     return weight_value, unit_name
+
+def get_conversion_factor(unit_name):
+    """
+    Returns the conversion factor for a given unit name to its base unit.
+    For weights, base unit is grams; for volume, base unit is milliliters.
+    For package counts, returns 1.
+    """
+    unit_conversions = {
+        'g': 1,
+        'kg': 1000,
+        'ml': 1,
+        'l': 1000,
+        'pc': 1,
+        'pack': 1
+    }
+    return unit_conversions.get(unit_name.lower(), 1)
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Rimi categories...")
@@ -899,102 +1065,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
 
     logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
-
-def process_item(db: Session, store, item):
-    logger.debug(f"""
-    Processing raw item data:
-    - Name: {item['name']}
-    - Price: {item['price']}
-    - Image: {item['image']}
-    - Category: {item.get('category', 'N/A')}
-    - Weight Value: {item.get('weight_value', 'N/A')}
-    - Unit Name: {item.get('unit_name', 'N/A')}
-    """)
-
-    weight_value = item.get('weight_value')
-    unit_name = item.get('unit_name')
-    
-    unit = None
-    if weight_value and unit_name:
-        unit = unit_service.get_by_name(db, name=unit_name)
-        if not unit:
-            unit_data = schemas.UnitCreate(
-                name=unit_name,
-                conversion_factor=get_conversion_factor(unit_name)
-            )
-            unit = unit_service.create(db, unit=unit_data)
-            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
-
-    # Create or update ProductStoreData entry
-    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
-        db,
-        store_product_name=item['name'],
-        store_id=store.store_id
-    )
-
-    psd_data = schemas.ProductStoreDataCreate(
-        product_id=None,  # Initially null, will be set by matcher
-        store_id=store.store_id,
-        price=item['price'],
-        store_product_name=item['name'],
-        store_weight_value=weight_value,
-        store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None
-    )
-
-    if existing_psd:
-        old_price = existing_psd.price
-        # If price has changed, save the old price to history
-        if float(old_price) != float(item['price']):
-            price_history = schemas.ProductPriceHistoryCreate(
-                product_store_id=existing_psd.product_store_id,
-                price=old_price
-            )
-            product_price_history_service.create(db, price_history)
-        
-        existing_psd.price = item['price']
-        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
-        db.commit()
-        logger.debug(f"""
-        Updated existing store data:
-        - Product: {item['name']}
-        - Old price: {old_price}
-        - New price: {item['price']}
-        - Last updated: {existing_psd.last_updated}
-        """)
-    else:
-        new_psd = product_store_data_service.create(db, psd=psd_data)
-        logger.debug(f"""
-        Created new store data:
-        - Product: {item['name']}
-        - Price: {item['price']}
-        - Store: {store.name}
-        - Product Store ID: {new_psd.product_store_id}
-        """)
-
-    logger.debug("=" * 50)
-
-def parse_weight(weight_str):
-    if not weight_str:
-        return None, None
-    parts = weight_str.strip().split()
-    if len(parts) != 2:
-        return None, None
-    try:
-        value = float(parts[0].replace(',', '.'))
-        unit = parts[1].lower()
-        return value, unit 
-    except ValueError:
-        return None, None
-
-def get_conversion_factor(unit_name):
-    unit_conversions = {
-        'g': 1,
-        'kg': 1000,
-        'ml': 1,
-        'l': 1000,
-    }
-    return unit_conversions.get(unit_name, 1)
 
 def get_all_selver_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Selver categories...")
