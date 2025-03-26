@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS product_store_data (
     last_updated TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     store_product_name VARCHAR(255),
     store_image_url TEXT,
+    store_product_url TEXT,
+    store_category_id INTEGER,
     store_weight_value DECIMAL(10, 2) CHECK (store_weight_value >= 0),
     store_unit_id INTEGER,
     ean VARCHAR(13), 
@@ -120,7 +122,12 @@ CREATE TABLE IF NOT EXISTS product_store_data (
             ON UPDATE CASCADE,
     CONSTRAINT fk_store_unit
         FOREIGN KEY (store_unit_id)
-            REFERENCES units (unit_id)
+            REFERENCES units (unit_id),
+    CONSTRAINT fk_store_category
+        FOREIGN KEY (store_category_id)
+            REFERENCES categories (category_id)
+            ON DELETE SET NULL
+            ON UPDATE CASCADE
 );
 
 CREATE TRIGGER trg_update_productstoredata_updated_at
@@ -154,6 +161,12 @@ CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_name_trgm
 CREATE INDEX IF NOT EXISTS idx_productstoredata_ean
     ON product_store_data (ean);
 
+CREATE INDEX IF NOT EXISTS idx_productstoredata_store_product_url
+    ON product_store_data (store_product_url);
+
+CREATE INDEX IF NOT EXISTS idx_productstoredata_store_category_id
+    ON product_store_data (store_category_id);
+
 CREATE INDEX IF NOT EXISTS idx_stores_name
     ON stores (name);
 
@@ -175,6 +188,8 @@ RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.store_product_name <> OLD.store_product_name
         OR NEW.store_image_url <> OLD.store_image_url
+        OR NEW.store_product_url <> OLD.store_product_url
+        OR NEW.store_category_id <> OLD.store_category_id
         OR NEW.ean <> OLD.ean
         OR NEW.store_weight_value <> OLD.store_weight_value
         OR NEW.store_unit_id <> OLD.store_unit_id THEN
