@@ -8,6 +8,9 @@ class CategoryService:
     def get_by_name(self, db: Session, name: str):
         return db.query(models.Category).filter(models.Category.name == name).first()
 
+    def get_top_categories(self, db: Session):
+        return db.query(models.Category).filter(models.Category.parent_id == None).all()
+
     def create(self, db: Session, category: schemas.CategoryCreate):
         db_category = models.Category(**category.dict())
         db.add(db_category)

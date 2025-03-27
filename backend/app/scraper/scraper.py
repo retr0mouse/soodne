@@ -27,6 +27,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
 import uuid
+from app.services.category_service import category_service
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -334,115 +335,20 @@ def parse_product_details(name):
     return weight_value, unit_name
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
-    logger.info("Fetching Rimi categories...")
-    categories = get_rimi_categories(headers, user_agent)
+    # logger.info("Fetching Rimi categories...")
+    # categories = get_rimi_categories(headers, user_agent)
+    # add_rimi_categories(db, categories)
+    top_categories = category_service.get_top_categories(db)
+    logger.info(f"Found {len(top_categories)} Rimi categories")
 
-    
-    # max_retries = 3
-    # retry_count = 0
-    # categories = []
-    #
-    # # Try to get categories with multiple attempts if needed
-    # while retry_count < max_retries and not categories:
-    #     try:
-    #         categories = get_rimi_categories(headers, user_agent)
-    #         if not categories:
-    #             logger.warning(f"No categories returned (attempt {retry_count + 1}/{max_retries})")
-    #             retry_count += 1
-    #             time.sleep(10)  # Wait before retrying
-    #         else:
-    #             logger.info(f"Successfully found {len(categories)} Rimi categories")
-    #     except Exception as e:
-    #         logger.error(f"Error retrieving categories (attempt {retry_count + 1}/{max_retries}): {str(e)}")
-    #         retry_count += 1
-    #         time.sleep(10)  # Wait before retrying
-    #
-    # if not categories:
-    #     logger.error("Failed to retrieve any categories after multiple attempts")
-    #     return
-    
-    # total_products_processed = 0
-    # successful_categories = 0
-    # failed_categories = 0
-    #
-    # # Shuffle categories to avoid getting stuck on problematic ones
-    # import random
-    # random.shuffle(categories)
-    # logger.info("Categories shuffled to randomize processing order")
-    #
-    # for category_index, category in enumerate(categories, 1):
-    #     try:
-    #         logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
-    #         if not category['link']:
-    #             logger.warning(f"Skipping category {category['title']} - no link available")
-    #             failed_categories += 1
-    #             continue
-    #
-    #         # Process each category with retry logic
-    #         category_retry_count = 0
-    #         category_items = []
-    #
-    #         while category_retry_count < 3 and not category_items:  # Try up to 3 times per category
-    #             try:
-    #                 category_items = get_rimi_items_by_category(category, headers, user_agent)
-    #                 if not category_items and category_retry_count < 2:
-    #                     logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/3)")
-    #                     category_retry_count += 1
-    #                     time.sleep(random_delay(5, 10))
-    #             except Exception as e:
-    #                 logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/3): {str(e)}")
-    #                 category_retry_count += 1
-    #                 if category_retry_count < 3:
-    #                     time.sleep(random_delay(5, 10))
-    #
-    #         if not category_items:
-    #             logger.error(f"Failed to retrieve items for category {category['title']} after retries")
-    #             failed_categories += 1
-    #             continue
-    #
-    #         logger.info(f"Found {len(category_items)} items in category {category['title']}")
-    #         successful_categories += 1
-    #
-    #         # Process items in batches to avoid long transactions
-    #         batch_size = 50
-    #         for i in range(0, len(category_items), batch_size):
-    #             batch = category_items[i:i + batch_size]
-    #             logger.info(f"Processing batch {i//batch_size + 1}/{(len(category_items) + batch_size - 1)//batch_size} of items in category {category['title']}")
-    #
-    #             batch_success_count = 0
-    #             for item_index, item in enumerate(batch, 1):
-    #                 try:
-    #                     logger.info(f"Processing item {item_index}/{len(batch)}: {item['name']}")
-    #                     process_item(db, store, item)
-    #                     total_products_processed += 1
-    #                     batch_success_count += 1
-    #                 except Exception as e:
-    #                     logger.error(f"Error processing item {item['name']}: {str(e)}")
-    #                     continue
-    #
-    #             logger.info(f"Successfully processed {batch_success_count}/{len(batch)} items in this batch")
-    #
-    #             # Commit the database changes after each batch
-    #             try:
-    #                 db.commit()
-    #                 logger.info(f"Batch {i//batch_size + 1} committed successfully")
-    #             except Exception as e:
-    #                 logger.error(f"Error committing batch {i//batch_size + 1}: {str(e)}")
-    #                 db.rollback()
-    #
-    #             # Small delay between batches
-    #             time.sleep(random_delay(1, 3))
-    #
-    #     except Exception as e:
-    #         logger.error(f"Unhandled error processing category {category['title']}: {str(e)}")
-    #         failed_categories += 1
-    #         continue
-    #
-    #     # After each category, log progress
-    #     logger.info(f"Progress: {category_index}/{len(categories)} categories processed. Success: {successful_categories}, Failed: {failed_categories}")
-    #
-    # logger.info(f"Rimi scraping completed. Total products processed: {total_products_processed}")
-    # logger.info(f"Categories summary - Total: {len(categories)}, Successful: {successful_categories}, Failed: {failed_categories}")
+    for category_index, category in enumerate(top_categories, 1):
+        logger.info(f"Processing Rimi category {category_index}/{len(top_categories)}: {category.name}")
+        category_items = get_rimi_items_by_category(category, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category.name}")
+
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            process_item(db, store, item)
 
 @retry(
     stop=stop_after_attempt(3),
@@ -476,91 +382,48 @@ def get_rimi_categories(headers, user_agent):
 
         # Wait for page to be fully loaded
         WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+            EC.visibility_of_element_located((By.TAG_NAME, "body"))
         )
 
         # Try to handle cookie dialog if it appears
         try:
             cookie_dialog = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
+                EC.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
             )
-            if cookie_dialog:
-                print("CLICK THIS BITCH")
-                driver.find_element(By.ID, "CybotCookiebotDialogBodyButtonDecline").click()
-                print("CLICKED?")
+            cookie_dialog.click()
         except Exception as e:
             logger.debug(f"Cookie dialog handling: {str(e)}")
 
-        categories_selector = ".category-list-item .gtm"
+        driver.find_element(By.CLASS_NAME, 'category-menu').click()
+
+        categories_selector = "category-list-item"
         categories = []
 
-        # def find_rimi_categories_recursively(elements):
-        #     for element in elements:
-        #         category_text = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
-        #         categories.append(category_text)
-        #         print(f"Found category: {category_text}")
-        #
-        #         # Find and click the arrow to expand subcategories (if available)
-        #         arrow_element = element.find_element(By.CLASS_NAME, "arrow")
-        #         if arrow_element:
-        #             try:
-        #                 element.click()
-        #                 time.sleep(1)
-        #                 sub_elements = element.find_elements(By.CSS_SELECTOR, categories_selector)
-        #                 find_rimi_categories_recursively(sub_elements)
-        #             except Exception as e:
-        #                 print(f"Error clicking arrow: {e}")
-        #
-        # # Find all top-level categories and start the recursive function
-        # elements = driver.find_elements(By.CSS_SELECTOR, categories_selector)
-        # print(f"Found {len(elements)} category elements with selector: {categories_selector}")
-        # find_rimi_categories_recursively(elements)
-        #
-        # print("All categories:", categories)
+        def find_rimi_categories_recursively(depth = 0):
+            menu = driver.find_elements(By.CLASS_NAME, 'category-menu')[depth]
+            found_categories = menu.find_elements(By.CLASS_NAME, categories_selector)
+            nested_categories = []
 
-    # Try multiple selectors to find categories
-        # selectors = [
-        #     "desktop_category_menu_button",
-        # ]
-        #
-        # category_elements = []
-        # for selector in selectors:
-        #     try:
-        #         elements = driver.find_elements(By.CSS_SELECTOR, selector)
-        #         if elements and len(elements) > 0:
-        #             logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
-        #             category_elements = elements
-        #     except Exception as e:
-        #         logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
-        #
-        # if category_elements:
-        #     logger.debug(f"Found {len(category_elements)} category elements")
-        #
-        # logger.warning(f"No category elements found with URL {url}, trying next URL if available")
-        #
-        # # Process found category elements
-        # for element in category_elements:
-        #     try:
-        #         href = element.get_attribute('href')
-        #         # Different ways to get the name depending on element type
-        #         try:
-        #             name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
-        #         except:
-        #             name = element.text.strip()
-        #
-        #         if href and name and '/c/' in href:
-        #             category_id = href.split('/c/')[-1] if '/c/' in href else None
-        #
-        #             if category_id:
-        #                 categories.append({
-        #                     'title': name,
-        #                     'link': href,
-        #                     'id': category_id.strip()
-        #                 })
-        #                 logger.debug(f"Added category: {name} (ID: {category_id})")
-        #     except Exception as e:
-        #         logger.warning(f"Error processing category element: {str(e)}")
-        #         continue
+            for category in found_categories:
+                found_text_elements = category.find_elements(By.CSS_SELECTOR, "span.name")
+                if not len(found_text_elements): continue
+
+                category_name = found_text_elements[0].text.strip()
+                category_dict = {"name": category_name, "subcategories": []}
+
+                found_button_elements = category.find_elements(By.TAG_NAME, 'button')
+                if found_button_elements:
+                    found_button_elements[0].click()
+                    category_dict["subcategories"] = find_rimi_categories_recursively(depth + 1)
+                    category_dict["url"] = found_button_elements[0].get_attribute('href')
+
+                nested_categories.append(category_dict)
+
+            return nested_categories
+
+        categories = find_rimi_categories_recursively()
+
+        return categories
 
     except Exception as e:
         logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
@@ -602,7 +465,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
         logger.debug("Chrome driver successfully initialized")
 
         while page <= max_pages:  # Add a maximum page limit to prevent infinite loops
-            url = f"https://www.rimi.ee{category['link']}?pageSize=100&currentPage={page}"
+            url = f"https://www.rimi.ee{category.url}?pageSize=100&currentPage={page}"
             logger.debug(f"Loading page: {url}")
 
             try:
@@ -793,7 +656,8 @@ def get_rimi_items_by_category(category, headers, user_agent):
                             'price': price,
                             'image': image_url,
                             'weight_value': weight_value,
-                            'unit_name': unit_name
+                            'unit_name': unit_name,
+                            'category_id': category.category_id
                         })
                         valid_products_count += 1
                     except Exception as e:
@@ -837,6 +701,7 @@ def process_item(db: Session, store, item):
     - Category: {item.get('category', 'N/A')}
     - Weight Value: {item.get('weight_value', 'N/A')}
     - Unit Name: {item.get('unit_name', 'N/A')}
+    - Category Id: {item.get('category_id', 'N/A')}
     """)
 
     weight_value = item.get('weight_value')
@@ -867,7 +732,8 @@ def process_item(db: Session, store, item):
         store_product_name=item['name'],
         store_weight_value=weight_value,
         store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None
+        store_unit_id=unit.unit_id if unit else None,
+        store_category_id=item['category_id']
     )
 
     if existing_psd:
@@ -1181,3 +1047,23 @@ def get_prisma_items_by_category(category, headers, user_agent):
     
     logger.debug(f"Total products collected for category {category['name']}: {len(result_products)}")
     return result_products
+
+def add_rimi_categories(db: Session, categories, parent_id=None):
+    for category in categories:
+        existing_category = category_service.get_by_name(db, name=category['name'])
+        if not existing_category:
+            category_data = schemas.CategoryCreate(
+                name=category['name'],
+                parent_id=parent_id,
+                url=category['url'] if 'url' in category else None
+            )
+
+            db_category = category_service.create(db, category_data)
+            logger.debug(f"Added category: {db_category.name} with ID: {db_category.category_id}")
+
+            if category['subcategories']:
+                add_rimi_categories(db, category['subcategories'], parent_id=db_category.category_id)
+        else:
+            logger.debug(f"Category '{category['name']}' already exists with ID: {existing_category.category_id}")
+
+

@@ -32,4 +32,6 @@ venv.bak/
 *.sqlite3
 .pytest_cache/
 .coverage
-htmlcov/ 
+htmlcov/
+/shell.nix
+/logs/*

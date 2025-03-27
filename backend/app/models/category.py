@@ -8,3 +8,4 @@ class Category(Base):
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, nullable=True)
     parent_id = Column(Integer, ForeignKey("categories.category_id"), nullable=True)
+    url = Column(String(255), nullable=True)
