@@ -47,10 +47,10 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
-            "Barbora": "https://barbora.ee",
+            # "Barbora": "https://barbora.ee",
             "Rimi": "https://www.rimi.ee/epood/ee",
-            "Selver": "https://www.selver.ee",
-            "Prisma": "https://www.prismamarket.ee"
+            # "Selver": "https://www.selver.ee",
+            # "Prisma": "https://www.prismamarket.ee"
         }
 
         for store_name, url in stores.items():
@@ -335,112 +335,114 @@ def parse_product_details(name):
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Rimi categories...")
+    categories = get_rimi_categories(headers, user_agent)
+
     
-    max_retries = 3
-    retry_count = 0
-    categories = []
+    # max_retries = 3
+    # retry_count = 0
+    # categories = []
+    #
+    # # Try to get categories with multiple attempts if needed
+    # while retry_count < max_retries and not categories:
+    #     try:
+    #         categories = get_rimi_categories(headers, user_agent)
+    #         if not categories:
+    #             logger.warning(f"No categories returned (attempt {retry_count + 1}/{max_retries})")
+    #             retry_count += 1
+    #             time.sleep(10)  # Wait before retrying
+    #         else:
+    #             logger.info(f"Successfully found {len(categories)} Rimi categories")
+    #     except Exception as e:
+    #         logger.error(f"Error retrieving categories (attempt {retry_count + 1}/{max_retries}): {str(e)}")
+    #         retry_count += 1
+    #         time.sleep(10)  # Wait before retrying
+    #
+    # if not categories:
+    #     logger.error("Failed to retrieve any categories after multiple attempts")
+    #     return
     
-    # Try to get categories with multiple attempts if needed
-    while retry_count < max_retries and not categories:
-        try:
-            categories = get_rimi_categories(headers, user_agent)
-            if not categories:
-                logger.warning(f"No categories returned (attempt {retry_count + 1}/{max_retries})")
-                retry_count += 1
-                time.sleep(10)  # Wait before retrying
-            else:
-                logger.info(f"Successfully found {len(categories)} Rimi categories")
-        except Exception as e:
-            logger.error(f"Error retrieving categories (attempt {retry_count + 1}/{max_retries}): {str(e)}")
-            retry_count += 1
-            time.sleep(10)  # Wait before retrying
-    
-    if not categories:
-        logger.error("Failed to retrieve any categories after multiple attempts")
-        return
-    
-    total_products_processed = 0
-    successful_categories = 0
-    failed_categories = 0
-    
-    # Shuffle categories to avoid getting stuck on problematic ones
-    import random
-    random.shuffle(categories)
-    logger.info("Categories shuffled to randomize processing order")
-    
-    for category_index, category in enumerate(categories, 1):
-        try:
-            logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
-            if not category['link']:
-                logger.warning(f"Skipping category {category['title']} - no link available")
-                failed_categories += 1
-                continue
-            
-            # Process each category with retry logic
-            category_retry_count = 0
-            category_items = []
-            
-            while category_retry_count < 3 and not category_items:  # Try up to 3 times per category
-                try:
-                    category_items = get_rimi_items_by_category(category, headers, user_agent)
-                    if not category_items and category_retry_count < 2:
-                        logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/3)")
-                        category_retry_count += 1
-                        time.sleep(random_delay(5, 10))
-                except Exception as e:
-                    logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/3): {str(e)}")
-                    category_retry_count += 1
-                    if category_retry_count < 3:
-                        time.sleep(random_delay(5, 10))
-            
-            if not category_items:
-                logger.error(f"Failed to retrieve items for category {category['title']} after retries")
-                failed_categories += 1
-                continue
-                
-            logger.info(f"Found {len(category_items)} items in category {category['title']}")
-            successful_categories += 1
-            
-            # Process items in batches to avoid long transactions
-            batch_size = 50
-            for i in range(0, len(category_items), batch_size):
-                batch = category_items[i:i + batch_size]
-                logger.info(f"Processing batch {i//batch_size + 1}/{(len(category_items) + batch_size - 1)//batch_size} of items in category {category['title']}")
-                
-                batch_success_count = 0
-                for item_index, item in enumerate(batch, 1):
-                    try:
-                        logger.info(f"Processing item {item_index}/{len(batch)}: {item['name']}")
-                        process_item(db, store, item)
-                        total_products_processed += 1
-                        batch_success_count += 1
-                    except Exception as e:
-                        logger.error(f"Error processing item {item['name']}: {str(e)}")
-                        continue
-                
-                logger.info(f"Successfully processed {batch_success_count}/{len(batch)} items in this batch")
-                
-                # Commit the database changes after each batch
-                try:
-                    db.commit()
-                    logger.info(f"Batch {i//batch_size + 1} committed successfully")
-                except Exception as e:
-                    logger.error(f"Error committing batch {i//batch_size + 1}: {str(e)}")
-                    db.rollback()
-                
-                # Small delay between batches
-                time.sleep(random_delay(1, 3))
-                
-        except Exception as e:
-            logger.error(f"Unhandled error processing category {category['title']}: {str(e)}")
-            failed_categories += 1
-            continue
-        
-        # After each category, log progress
-        logger.info(f"Progress: {category_index}/{len(categories)} categories processed. Success: {successful_categories}, Failed: {failed_categories}")
-    
-    logger.info(f"Rimi scraping completed. Total products processed: {total_products_processed}")
-    logger.info(f"Categories summary - Total: {len(categories)}, Successful: {successful_categories}, Failed: {failed_categories}")
+    # total_products_processed = 0
+    # successful_categories = 0
+    # failed_categories = 0
+    #
+    # # Shuffle categories to avoid getting stuck on problematic ones
+    # import random
+    # random.shuffle(categories)
+    # logger.info("Categories shuffled to randomize processing order")
+    #
+    # for category_index, category in enumerate(categories, 1):
+    #     try:
+    #         logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
+    #         if not category['link']:
+    #             logger.warning(f"Skipping category {category['title']} - no link available")
+    #             failed_categories += 1
+    #             continue
+    #
+    #         # Process each category with retry logic
+    #         category_retry_count = 0
+    #         category_items = []
+    #
+    #         while category_retry_count < 3 and not category_items:  # Try up to 3 times per category
+    #             try:
+    #                 category_items = get_rimi_items_by_category(category, headers, user_agent)
+    #                 if not category_items and category_retry_count < 2:
+    #                     logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/3)")
+    #                     category_retry_count += 1
+    #                     time.sleep(random_delay(5, 10))
+    #             except Exception as e:
+    #                 logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/3): {str(e)}")
+    #                 category_retry_count += 1
+    #                 if category_retry_count < 3:
+    #                     time.sleep(random_delay(5, 10))
+    #
+    #         if not category_items:
+    #             logger.error(f"Failed to retrieve items for category {category['title']} after retries")
+    #             failed_categories += 1
+    #             continue
+    #
+    #         logger.info(f"Found {len(category_items)} items in category {category['title']}")
+    #         successful_categories += 1
+    #
+    #         # Process items in batches to avoid long transactions
+    #         batch_size = 50
+    #         for i in range(0, len(category_items), batch_size):
+    #             batch = category_items[i:i + batch_size]
+    #             logger.info(f"Processing batch {i//batch_size + 1}/{(len(category_items) + batch_size - 1)//batch_size} of items in category {category['title']}")
+    #
+    #             batch_success_count = 0
+    #             for item_index, item in enumerate(batch, 1):
+    #                 try:
+    #                     logger.info(f"Processing item {item_index}/{len(batch)}: {item['name']}")
+    #                     process_item(db, store, item)
+    #                     total_products_processed += 1
+    #                     batch_success_count += 1
+    #                 except Exception as e:
+    #                     logger.error(f"Error processing item {item['name']}: {str(e)}")
+    #                     continue
+    #
+    #             logger.info(f"Successfully processed {batch_success_count}/{len(batch)} items in this batch")
+    #
+    #             # Commit the database changes after each batch
+    #             try:
+    #                 db.commit()
+    #                 logger.info(f"Batch {i//batch_size + 1} committed successfully")
+    #             except Exception as e:
+    #                 logger.error(f"Error committing batch {i//batch_size + 1}: {str(e)}")
+    #                 db.rollback()
+    #
+    #             # Small delay between batches
+    #             time.sleep(random_delay(1, 3))
+    #
+    #     except Exception as e:
+    #         logger.error(f"Unhandled error processing category {category['title']}: {str(e)}")
+    #         failed_categories += 1
+    #         continue
+    #
+    #     # After each category, log progress
+    #     logger.info(f"Progress: {category_index}/{len(categories)} categories processed. Success: {successful_categories}, Failed: {failed_categories}")
+    #
+    # logger.info(f"Rimi scraping completed. Total products processed: {total_products_processed}")
+    # logger.info(f"Categories summary - Total: {len(categories)}, Successful: {successful_categories}, Failed: {failed_categories}")
 
 @retry(
     stop=stop_after_attempt(3),
@@ -467,174 +469,99 @@ def get_rimi_categories(headers, user_agent):
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         logger.debug("Chrome driver initialized successfully")
-        
-        # Try multiple URLs to get categories
-        urls_to_try = [
-            'https://www.rimi.ee/epood/ee',
-            'https://www.rimi.ee/epood/ee/categories',
-            'https://www.rimi.ee/epood/ee/products'
-        ]
-        
-        for url_index, url in enumerate(urls_to_try):
-            logger.debug(f"Trying URL {url_index + 1}/{len(urls_to_try)}: {url}")
-            driver.get(url)
-            
-            # First wait for page to basically load
-            time.sleep(10)
-            
-            # More reliable wait - wait for page to be fully loaded
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            
-            # Try to handle cookie dialog if it appears
-            try:
-                cookie_dialog = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
-                )
-                if cookie_dialog:
-                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
-                    logger.debug("Removed cookie dialog")
-            except Exception as e:
-                logger.debug(f"Cookie dialog handling: {str(e)}")
-            
-            # Try multiple selectors to find categories
-            selectors = [
-                ".category-menu button.trigger",
-                ".category-navigation a[href*='/c/']",
-                "a[href*='/c/']",
-                ".category-menu__item a",
-                ".category-list a",
-                "nav a[href*='/c/']",
-                ".main-navigation a[href*='/c/']"
-            ]
-            
-            category_elements = []
-            for selector in selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements and len(elements) > 0:
-                        logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
-                        category_elements = elements
-                        break
-                except Exception as e:
-                    logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
-            
-            if category_elements:
-                logger.debug(f"Found {len(category_elements)} category elements")
-                break
-            
-            logger.warning(f"No category elements found with URL {url}, trying next URL if available")
-        
-        # Process found category elements
-        for element in category_elements:
-            try:
-                href = element.get_attribute('href')
-                # Different ways to get the name depending on element type
-                try:
-                    name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
-                except:
-                    name = element.text.strip()
-                
-                if href and name and '/c/' in href:
-                    category_id = href.split('/c/')[-1] if '/c/' in href else None
-                    
-                    if category_id:
-                        categories.append({
-                            'title': name,
-                            'link': href,
-                            'id': category_id.strip()
-                        })
-                        logger.debug(f"Added category: {name} (ID: {category_id})")
-            except Exception as e:
-                logger.warning(f"Error processing category element: {str(e)}")
-                continue
 
-        if not categories:
-            logger.debug("Trying JavaScript method to get categories")
-            # Try multiple JavaScript approaches
-            js_scripts = [
-                """
-                return Array.from(document.querySelectorAll('.category-menu button.trigger')).map(el => {
-                    const href = el.getAttribute('href');
-                    const categoryId = href ? href.split('/c/').pop().trim() : null;
-                    return {
-                        title: el.querySelector('span.name').textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat.title && cat.link && cat.id);
-                """,
-                """
-                return Array.from(document.querySelectorAll('a[href*="/c/"]')).map(el => {
-                    const href = el.getAttribute('href');
-                    const categoryId = href ? href.split('/c/').pop().trim() : null;
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat.title && cat.link && cat.id);
-                """,
-                """
-                // Try to find categories in any navigation element
-                return Array.from(document.querySelectorAll('nav a, .navigation a, .menu a')).map(el => {
-                    const href = el.getAttribute('href');
-                    if (!href || !href.includes('/c/')) return null;
-                    
-                    const categoryId = href.split('/c/').pop().trim();
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat && cat.title && cat.link && cat.id);
-                """,
-                """
-                // Last resort - try to find any links that might be categories
-                return Array.from(document.querySelectorAll('a')).map(el => {
-                    const href = el.getAttribute('href');
-                    if (!href || !href.includes('/c/')) return null;
-                    
-                    const categoryId = href.split('/c/').pop().trim();
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat && cat.title && cat.link && cat.id);
-                """
-            ]
-            
-            for script in js_scripts:
-                try:
-                    categories_js = driver.execute_script(script)
-                    
-                    if categories_js and len(categories_js) > 0:
-                        categories = categories_js
-                        logger.debug(f"Found {len(categories)} categories using JavaScript")
-                        break
-                except Exception as e:
-                    logger.warning(f"JavaScript extraction attempt failed: {str(e)}")
-        
-        # If still no categories, try hardcoded fallback categories
-        if not categories:
-            logger.warning("No categories found through normal methods, using fallback categories")
-            fallback_categories = [
-                {"title": "Puu- ja köögiviljad", "link": "/epood/ee/c/puu-ja-koogiviljad", "id": "puu-ja-koogiviljad"},
-                {"title": "Liha ja kala", "link": "/epood/ee/c/liha-ja-kala", "id": "liha-ja-kala"},
-                {"title": "Piimatooted ja munad", "link": "/epood/ee/c/piimatooted-ja-munad", "id": "piimatooted-ja-munad"},
-                {"title": "Leivad ja saiad", "link": "/epood/ee/c/leivad-ja-saiad", "id": "leivad-ja-saiad"},
-                {"title": "Valmistoit", "link": "/epood/ee/c/valmistoit", "id": "valmistoit"},
-                {"title": "Külmutatud toit", "link": "/epood/ee/c/kulmutatud-toit", "id": "kulmutatud-toit"},
-                {"title": "Kuivained ja hommikusöök", "link": "/epood/ee/c/kuivained-ja-hommikusook", "id": "kuivained-ja-hommikusook"},
-                {"title": "Joogid", "link": "/epood/ee/c/joogid", "id": "joogid"},
-                {"title": "Maiustused ja snäkid", "link": "/epood/ee/c/maiustused-ja-snakid", "id": "maiustused-ja-snakid"}
-            ]
-            categories = fallback_categories
-            
-        return categories
-        
+        url = 'https://www.rimi.ee/epood/ee'
+
+        driver.get(url)
+
+        # Wait for page to be fully loaded
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        # Try to handle cookie dialog if it appears
+        try:
+            cookie_dialog = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
+            )
+            if cookie_dialog:
+                print("CLICK THIS BITCH")
+                driver.find_element(By.ID, "CybotCookiebotDialogBodyButtonDecline").click()
+                print("CLICKED?")
+        except Exception as e:
+            logger.debug(f"Cookie dialog handling: {str(e)}")
+
+        categories_selector = ".category-list-item .gtm"
+        categories = []
+
+        # def find_rimi_categories_recursively(elements):
+        #     for element in elements:
+        #         category_text = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
+        #         categories.append(category_text)
+        #         print(f"Found category: {category_text}")
+        #
+        #         # Find and click the arrow to expand subcategories (if available)
+        #         arrow_element = element.find_element(By.CLASS_NAME, "arrow")
+        #         if arrow_element:
+        #             try:
+        #                 element.click()
+        #                 time.sleep(1)
+        #                 sub_elements = element.find_elements(By.CSS_SELECTOR, categories_selector)
+        #                 find_rimi_categories_recursively(sub_elements)
+        #             except Exception as e:
+        #                 print(f"Error clicking arrow: {e}")
+        #
+        # # Find all top-level categories and start the recursive function
+        # elements = driver.find_elements(By.CSS_SELECTOR, categories_selector)
+        # print(f"Found {len(elements)} category elements with selector: {categories_selector}")
+        # find_rimi_categories_recursively(elements)
+        #
+        # print("All categories:", categories)
+
+    # Try multiple selectors to find categories
+        # selectors = [
+        #     "desktop_category_menu_button",
+        # ]
+        #
+        # category_elements = []
+        # for selector in selectors:
+        #     try:
+        #         elements = driver.find_elements(By.CSS_SELECTOR, selector)
+        #         if elements and len(elements) > 0:
+        #             logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
+        #             category_elements = elements
+        #     except Exception as e:
+        #         logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
+        #
+        # if category_elements:
+        #     logger.debug(f"Found {len(category_elements)} category elements")
+        #
+        # logger.warning(f"No category elements found with URL {url}, trying next URL if available")
+        #
+        # # Process found category elements
+        # for element in category_elements:
+        #     try:
+        #         href = element.get_attribute('href')
+        #         # Different ways to get the name depending on element type
+        #         try:
+        #             name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
+        #         except:
+        #             name = element.text.strip()
+        #
+        #         if href and name and '/c/' in href:
+        #             category_id = href.split('/c/')[-1] if '/c/' in href else None
+        #
+        #             if category_id:
+        #                 categories.append({
+        #                     'title': name,
+        #                     'link': href,
+        #                     'id': category_id.strip()
+        #                 })
+        #                 logger.debug(f"Added category: {name} (ID: {category_id})")
+        #     except Exception as e:
+        #         logger.warning(f"Error processing category element: {str(e)}")
+        #         continue
+
     except Exception as e:
         logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
         return []
@@ -646,6 +573,7 @@ def get_rimi_categories(headers, user_agent):
                 logger.debug("Chrome driver closed successfully")
         except Exception as e:
             logger.error(f"Error closing driver: {str(e)}")
+
 
 @retry(
     stop=stop_after_attempt(3),
