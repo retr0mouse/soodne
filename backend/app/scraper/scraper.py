@@ -109,7 +109,7 @@ def process_store(db: Session, store):
         case _:
             logger.info(f"No scraper for store {store} is implemented")
 
-def process_category_path(db: Session, category_path_url):
+def process_barbora_category_path(db: Session, category_path_url):
     """
     Process category hierarchy from category_path_url.
     Returns the leaf category (the most specific one).
@@ -155,7 +155,9 @@ def process_item(db: Session, store, item):
     - Category: {item.get('category', 'N/A')}
     - Weight Value: {item.get('weight_value', 'N/A')}
     - Unit Name: {item.get('unit_name', 'N/A')}
-    - URL: {item.get('url', 'N/A')}
+    - Product Url: {item.get('url', 'N/A')}
+    - Category Url: {item.get('category_path_url', 'N/A')}
+    - Category Id: {item.get('category_id', 'N/A')}
     """)
 
     weight_value = item.get('weight_value')
@@ -172,27 +174,6 @@ def process_item(db: Session, store, item):
             unit = unit_service.create(db, unit=unit_data)
             logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
 
-    # Process category path if it exists
-    category = None
-    if 'category_path_url' in item and item['category_path_url']:
-        category = process_category_path(db, item['category_path_url'])
-        logger.debug(f"Processed category path: {item['category_path_url']} -> {category.name if category else None}")
-
-    # Create full product URL
-    product_url = None
-    if 'url' in item and item['url']:
-        # Make sure store URL doesn't have trailing slash
-        store_url = store.website_url.rstrip('/')
-        # Make sure product URL doesn't have leading slash
-        product_path = item['url'].lstrip('/')
-
-        # For Barbora, ensure URL uses 'toode' format
-        if store.name == 'Barbora' and 'toode' not in product_path:
-            product_path = f"toode/{product_path}"
-
-        product_url = f"{store_url}/{product_path}"
-        logger.debug(f"Created product URL: {product_url}")
-
     # Create or update ProductStoreData entry
     existing_psd = product_store_data_service.get_by_store_product_name_and_store(
         db,
@@ -208,8 +189,8 @@ def process_item(db: Session, store, item):
         store_weight_value=weight_value,
         store_image_url=item['image'],
         store_unit_id=unit.unit_id if unit else None,
-        store_category_id=category.category_id if category else None,
-        store_product_url=product_url
+        store_category_id=item['category_id'],
+        store_product_url=item['url']
     )
 
     if existing_psd:
@@ -224,12 +205,6 @@ def process_item(db: Session, store, item):
 
         existing_psd.price = item['price']
         existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
-        # Update category if found
-        if category:
-            existing_psd.store_category_id = category.category_id
-        # Update product URL if available
-        if product_url:
-            existing_psd.store_product_url = product_url
         db.commit()
         logger.debug(f"""
         Updated existing store data:
@@ -237,8 +212,8 @@ def process_item(db: Session, store, item):
         - Old price: {old_price}
         - New price: {item['price']}
         - Last updated: {existing_psd.last_updated}
-        - Category: {category.name if category else None}
-        - Product URL: {product_url}
+        - Category: {item['category_id']}
+        - Product URL: {item['url']}
         """)
     else:
         new_psd = product_store_data_service.create(db, psd=psd_data)
@@ -248,8 +223,8 @@ def process_item(db: Session, store, item):
         - Price: {item['price']}
         - Store: {store.name}
         - Product Store ID: {new_psd.product_store_id}
-        - Category: {category.name if category else None}
-        - Product URL: {product_url}
+        - Category: {item['category_id']}
+        - Product URL: {item['url']}
         """)
 
     logger.debug("=" * 50)
@@ -258,16 +233,13 @@ def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
     categories = get_barbora_categories(headers, user_agent)
     logger.info(f"Found {len(categories)} Barbora categories")
-    
+
     for category_index, category in enumerate(categories, 1):
         logger.info(f"Processing Barbora category {category_index}/{len(categories)}: {category['title']}")
-        if not category['link']:
-            logger.warning(f"Skipping category {category['title']} - no link available")
-            continue
-            
-        category_items = get_barbora_items_by_category(category, headers, user_agent)
+
+        category_items = get_barbora_items_by_category(db, category['link'], headers, user_agent)
         logger.info(f"Found {len(category_items)} items in category {category['title']}")
-        
+
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
@@ -335,7 +307,7 @@ def get_barbora_categories(headers, user_agent):
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
-def get_barbora_items_by_category(category, headers, user_agent):
+def get_barbora_items_by_category(db: Session, category_link, headers, user_agent):
     chrome_options = Options()
     chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
@@ -357,7 +329,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
         logger.debug("Chrome driver successfully initialized")
         
         while True:
-            url = f"https://barbora.ee{category['link']}?page={page}"
+            url = f"https://barbora.ee{category_link}?page={page}"
             logger.debug(f"Loading page: {url}")
             
             try:
@@ -389,8 +361,14 @@ def get_barbora_items_by_category(category, headers, user_agent):
 
                         price = product['price']
                         image_url = product['image']
-                        category_path_url = product.get('category_path_url', None)
+                        category = process_barbora_category_path(db, product.get('category_path_url'))
+
                         url = product.get('Url', None)
+                        store_url = "https://barbora.ee"
+                        product_path = url.lstrip('/')
+                        product_path = f"toode/{product_path}"
+                        product_url = f"{store_url}/{product_path}"
+                        logger.debug(f"Created product URL: {product_url}")
 
                         result_products.append({
                             'name': name,
@@ -398,8 +376,9 @@ def get_barbora_items_by_category(category, headers, user_agent):
                             'image': image_url,
                             'weight_value': weight_value,
                             'unit_name': unit_name,
-                            'category_path_url': category_path_url,
-                            'url': url
+                            'category_path_url': category.url,
+                            'category_id': category.category_id,
+                            'url': product_url
                         })
                         valid_products_count += 1
                         
@@ -410,6 +389,9 @@ def get_barbora_items_by_category(category, headers, user_agent):
                             - Image: {image_url}
                             - Weight Value: {weight_value}
                             - Unit Name: {unit_name}
+                            - Category Path: {category.url}
+                            - Category Id: {category.category_id}
+                            - Product Url: {product_url}
                         """)
                         
                     except Exception as e:
@@ -514,6 +496,7 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
 
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            print(item['url'])
             process_item(db, store, item)
 
 @retry(
@@ -813,9 +796,12 @@ def get_rimi_items_by_category(category, headers, user_agent):
                         price = product.get('price', '')
                         if not price:
                             continue
+
+
                             
                         product_id = product.get('id', '')
-                        image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_limit,dpr_3.0,f_auto,q_auto:low,w_250/d_ecommerce:backend-fallback.png/MAT_{product_id}_PCE_EE"
+                        image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_fit,f_auto,h_960,q_auto,w_960/d_ecommerce:backend-fallback.png/MAT_{product_id}_PCE_EE"
+                        product_url = f"https://www.rimi.ee/epood/ee/tooted/p/{product_id}"
 
                         result_products.append({
                             'name': name,
@@ -823,7 +809,9 @@ def get_rimi_items_by_category(category, headers, user_agent):
                             'image': image_url,
                             'weight_value': weight_value,
                             'unit_name': unit_name,
-                            'category_id': category.category_id
+                            'category_path_url': category.url,
+                            'category_id': category.category_id,
+                            'url': product_url
                         })
                         valid_products_count += 1
                     except Exception as e:
@@ -857,82 +845,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
 
     logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
-
-def process_item(db: Session, store, item):
-    logger.debug(f"""
-    Processing raw item data:
-    - Name: {item['name']}
-    - Price: {item['price']}
-    - Image: {item['image']}
-    - Category: {item.get('category', 'N/A')}
-    - Weight Value: {item.get('weight_value', 'N/A')}
-    - Unit Name: {item.get('unit_name', 'N/A')}
-    - Category Id: {item.get('category_id', 'N/A')}
-    """)
-
-    weight_value = item.get('weight_value')
-    unit_name = item.get('unit_name')
-
-    unit = None
-    if weight_value and unit_name:
-        unit = unit_service.get_by_name(db, name=unit_name)
-        if not unit:
-            unit_data = schemas.UnitCreate(
-                name=unit_name,
-                conversion_factor=get_conversion_factor(unit_name)
-            )
-            unit = unit_service.create(db, unit=unit_data)
-            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
-
-    # Create or update ProductStoreData entry
-    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
-        db,
-        store_product_name=item['name'],
-        store_id=store.store_id
-    )
-
-    psd_data = schemas.ProductStoreDataCreate(
-        product_id=None,  # Initially null, will be set by matcher
-        store_id=store.store_id,
-        price=item['price'],
-        store_product_name=item['name'],
-        store_weight_value=weight_value,
-        store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None,
-        store_category_id=item['category_id']
-    )
-
-    if existing_psd:
-        old_price = existing_psd.price
-        # If price has changed, save the old price to history
-        if float(old_price) != float(item['price']):
-            price_history = schemas.ProductPriceHistoryCreate(
-                product_store_id=existing_psd.product_store_id,
-                price=old_price
-            )
-            product_price_history_service.create(db, price_history)
-        
-        existing_psd.price = item['price']
-        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
-        db.commit()
-        logger.debug(f"""
-        Updated existing store data:
-        - Product: {item['name']}
-        - Old price: {old_price}
-        - New price: {item['price']}
-        - Last updated: {existing_psd.last_updated}
-        """)
-    else:
-        new_psd = product_store_data_service.create(db, psd=psd_data)
-        logger.debug(f"""
-        Created new store data:
-        - Product: {item['name']}
-        - Price: {item['price']}
-        - Store: {store.name}
-        - Product Store ID: {new_psd.product_store_id}
-        """)
-
-    logger.debug("=" * 50)
 
 def parse_weight(weight_str):
     if not weight_str:
