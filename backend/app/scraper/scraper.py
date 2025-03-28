@@ -8,7 +8,8 @@ from app.services import (
     unit_service,
     product_service,
     product_store_data_service,
-    product_price_history_service
+    product_price_history_service,
+    category_service
 )
 from app.models.product_price_history import ProductPriceHistory
 import random
@@ -27,6 +28,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import re
 from urllib.parse import urljoin
 import uuid
+from app.services.category_service import category_service
 
 logger = setup_logger("scraper")
 logger.setLevel("DEBUG")
@@ -47,10 +49,10 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
-            "Barbora": "https://barbora.ee",
+            # "Barbora": "https://barbora.ee",
             "Rimi": "https://www.rimi.ee/epood/ee",
-            "Selver": "https://www.selver.ee",
-            "Prisma": "https://www.prismamarket.ee"
+            # "Selver": "https://www.selver.ee",
+            # "Prisma": "https://www.prismamarket.ee"
         }
 
         for store_name, url in stores.items():
@@ -107,20 +109,137 @@ def process_store(db: Session, store):
         case _:
             logger.info(f"No scraper for store {store} is implemented")
 
+def process_barbora_category_path(db: Session, category_path_url):
+    """
+    Process category hierarchy from category_path_url.
+    Returns the leaf category (the most specific one).
+    """
+    if not category_path_url:
+        return None
+
+    categories = category_path_url.split('/')
+    parent_id = None
+    last_category = None
+
+    for cat_name in categories:
+        if not cat_name:
+            continue
+
+        # Convert URL-friendly format to readable name
+        display_name = cat_name.replace('-', ' ').title()
+
+        # Check if category exists
+        category = category_service.get_by_name(db, display_name)
+
+        if not category:
+            # Create new category
+            category_data = schemas.CategoryCreate(
+                name=display_name,
+                parent_id=parent_id
+            )
+            category = category_service.create(db, category_data)
+            logger.debug(f"Created new category: {display_name} with parent_id: {parent_id}")
+
+        # Set as parent for next iteration
+        parent_id = category.category_id
+        last_category = category
+
+    return last_category
+
+def process_item(db: Session, store, item):
+    logger.debug(f"""
+    Processing raw item data:
+    - Name: {item['name']}
+    - Price: {item['price']}
+    - Image: {item['image']}
+    - Category: {item.get('category', 'N/A')}
+    - Weight Value: {item.get('weight_value', 'N/A')}
+    - Unit Name: {item.get('unit_name', 'N/A')}
+    - Product Url: {item.get('url', 'N/A')}
+    - Category Url: {item.get('category_path_url', 'N/A')}
+    - Category Id: {item.get('category_id', 'N/A')}
+    """)
+
+    weight_value = item.get('weight_value')
+    unit_name = item.get('unit_name')
+
+    unit = None
+    if weight_value and unit_name:
+        unit = unit_service.get_by_name(db, name=unit_name)
+        if not unit:
+            unit_data = schemas.UnitCreate(
+                name=unit_name,
+                conversion_factor=get_conversion_factor(unit_name)
+            )
+            unit = unit_service.create(db, unit=unit_data)
+            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
+
+    # Create or update ProductStoreData entry
+    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
+        db,
+        store_product_name=item['name'],
+        store_id=store.store_id
+    )
+
+    psd_data = schemas.ProductStoreDataCreate(
+        product_id=None,  # Initially null, will be set by matcher
+        store_id=store.store_id,
+        price=item['price'],
+        store_product_name=item['name'],
+        store_weight_value=weight_value,
+        store_image_url=item['image'],
+        store_unit_id=unit.unit_id if unit else None,
+        store_category_id=item['category_id'],
+        store_product_url=item['url']
+    )
+
+    if existing_psd:
+        old_price = existing_psd.price
+        # If price has changed, save the old price to history
+        if float(old_price) != float(item['price']):
+            price_history = schemas.ProductPriceHistoryCreate(
+                product_store_id=existing_psd.product_store_id,
+                price=old_price
+            )
+            product_price_history_service.create(db, price_history)
+
+        existing_psd.price = item['price']
+        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
+        db.commit()
+        logger.debug(f"""
+        Updated existing store data:
+        - Product: {item['name']}
+        - Old price: {old_price}
+        - New price: {item['price']}
+        - Last updated: {existing_psd.last_updated}
+        - Category: {item['category_id']}
+        - Product URL: {item['url']}
+        """)
+    else:
+        new_psd = product_store_data_service.create(db, psd=psd_data)
+        logger.debug(f"""
+        Created new store data:
+        - Product: {item['name']}
+        - Price: {item['price']}
+        - Store: {store.name}
+        - Product Store ID: {new_psd.product_store_id}
+        - Category: {item['category_id']}
+        - Product URL: {item['url']}
+        """)
+
+    logger.debug("=" * 50)
+
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
     categories = get_barbora_categories(headers, user_agent)
     logger.info(f"Found {len(categories)} Barbora categories")
-    
+
     for category_index, category in enumerate(categories, 1):
         logger.info(f"Processing Barbora category {category_index}/{len(categories)}: {category['title']}")
-        if not category['link']:
-            logger.warning(f"Skipping category {category['title']} - no link available")
-            continue
-            
-        category_items = get_barbora_items_by_category(category, headers, user_agent)
+
+        category_items = get_barbora_items_by_category(db, category['link'], headers, user_agent)
         logger.info(f"Found {len(category_items)} items in category {category['title']}")
-        
+
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
@@ -188,7 +307,7 @@ def get_barbora_categories(headers, user_agent):
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
-def get_barbora_items_by_category(category, headers, user_agent):
+def get_barbora_items_by_category(db: Session, category_link, headers, user_agent):
     chrome_options = Options()
     chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
@@ -210,7 +329,7 @@ def get_barbora_items_by_category(category, headers, user_agent):
         logger.debug("Chrome driver successfully initialized")
         
         while True:
-            url = f"https://barbora.ee{category['link']}?page={page}"
+            url = f"https://barbora.ee{category_link}?page={page}"
             logger.debug(f"Loading page: {url}")
             
             try:
@@ -242,13 +361,24 @@ def get_barbora_items_by_category(category, headers, user_agent):
 
                         price = product['price']
                         image_url = product['image']
+                        category = process_barbora_category_path(db, product.get('category_path_url'))
+
+                        url = product.get('Url', None)
+                        store_url = "https://barbora.ee"
+                        product_path = url.lstrip('/')
+                        product_path = f"toode/{product_path}"
+                        product_url = f"{store_url}/{product_path}"
+                        logger.debug(f"Created product URL: {product_url}")
 
                         result_products.append({
                             'name': name,
                             'price': price,
                             'image': image_url,
                             'weight_value': weight_value,
-                            'unit_name': unit_name
+                            'unit_name': unit_name,
+                            'category_path_url': category.url,
+                            'category_id': category.category_id,
+                            'url': product_url
                         })
                         valid_products_count += 1
                         
@@ -259,6 +389,9 @@ def get_barbora_items_by_category(category, headers, user_agent):
                             - Image: {image_url}
                             - Weight Value: {weight_value}
                             - Unit Name: {unit_name}
+                            - Category Path: {category.url}
+                            - Category Id: {category.category_id}
+                            - Product Url: {product_url}
                         """)
                         
                     except Exception as e:
@@ -333,114 +466,38 @@ def parse_product_details(name):
     
     return weight_value, unit_name
 
+def get_conversion_factor(unit_name):
+    """
+    Returns the conversion factor for a given unit name to its base unit.
+    For weights, base unit is grams; for volume, base unit is milliliters.
+    For package counts, returns 1.
+    """
+    unit_conversions = {
+        'g': 1,
+        'kg': 1000,
+        'ml': 1,
+        'l': 1000,
+        'pc': 1,
+        'pack': 1
+    }
+    return unit_conversions.get(unit_name.lower(), 1)
+
 def get_all_rimi_items(db: Session, store, headers, user_agent):
-    logger.info("Fetching Rimi categories...")
-    
-    max_retries = 3
-    retry_count = 0
-    categories = []
-    
-    # Try to get categories with multiple attempts if needed
-    while retry_count < max_retries and not categories:
-        try:
-            categories = get_rimi_categories(headers, user_agent)
-            if not categories:
-                logger.warning(f"No categories returned (attempt {retry_count + 1}/{max_retries})")
-                retry_count += 1
-                time.sleep(10)  # Wait before retrying
-            else:
-                logger.info(f"Successfully found {len(categories)} Rimi categories")
-        except Exception as e:
-            logger.error(f"Error retrieving categories (attempt {retry_count + 1}/{max_retries}): {str(e)}")
-            retry_count += 1
-            time.sleep(10)  # Wait before retrying
-    
-    if not categories:
-        logger.error("Failed to retrieve any categories after multiple attempts")
-        return
-    
-    total_products_processed = 0
-    successful_categories = 0
-    failed_categories = 0
-    
-    # Shuffle categories to avoid getting stuck on problematic ones
-    import random
-    random.shuffle(categories)
-    logger.info("Categories shuffled to randomize processing order")
-    
-    for category_index, category in enumerate(categories, 1):
-        try:
-            logger.info(f"Processing Rimi category {category_index}/{len(categories)}: {category['title']}")
-            if not category['link']:
-                logger.warning(f"Skipping category {category['title']} - no link available")
-                failed_categories += 1
-                continue
-            
-            # Process each category with retry logic
-            category_retry_count = 0
-            category_items = []
-            
-            while category_retry_count < 3 and not category_items:  # Try up to 3 times per category
-                try:
-                    category_items = get_rimi_items_by_category(category, headers, user_agent)
-                    if not category_items and category_retry_count < 2:
-                        logger.warning(f"No items found in category {category['title']} (attempt {category_retry_count + 1}/3)")
-                        category_retry_count += 1
-                        time.sleep(random_delay(5, 10))
-                except Exception as e:
-                    logger.error(f"Error processing category {category['title']} (attempt {category_retry_count + 1}/3): {str(e)}")
-                    category_retry_count += 1
-                    if category_retry_count < 3:
-                        time.sleep(random_delay(5, 10))
-            
-            if not category_items:
-                logger.error(f"Failed to retrieve items for category {category['title']} after retries")
-                failed_categories += 1
-                continue
-                
-            logger.info(f"Found {len(category_items)} items in category {category['title']}")
-            successful_categories += 1
-            
-            # Process items in batches to avoid long transactions
-            batch_size = 50
-            for i in range(0, len(category_items), batch_size):
-                batch = category_items[i:i + batch_size]
-                logger.info(f"Processing batch {i//batch_size + 1}/{(len(category_items) + batch_size - 1)//batch_size} of items in category {category['title']}")
-                
-                batch_success_count = 0
-                for item_index, item in enumerate(batch, 1):
-                    try:
-                        logger.info(f"Processing item {item_index}/{len(batch)}: {item['name']}")
-                        process_item(db, store, item)
-                        total_products_processed += 1
-                        batch_success_count += 1
-                    except Exception as e:
-                        logger.error(f"Error processing item {item['name']}: {str(e)}")
-                        continue
-                
-                logger.info(f"Successfully processed {batch_success_count}/{len(batch)} items in this batch")
-                
-                # Commit the database changes after each batch
-                try:
-                    db.commit()
-                    logger.info(f"Batch {i//batch_size + 1} committed successfully")
-                except Exception as e:
-                    logger.error(f"Error committing batch {i//batch_size + 1}: {str(e)}")
-                    db.rollback()
-                
-                # Small delay between batches
-                time.sleep(random_delay(1, 3))
-                
-        except Exception as e:
-            logger.error(f"Unhandled error processing category {category['title']}: {str(e)}")
-            failed_categories += 1
-            continue
-        
-        # After each category, log progress
-        logger.info(f"Progress: {category_index}/{len(categories)} categories processed. Success: {successful_categories}, Failed: {failed_categories}")
-    
-    logger.info(f"Rimi scraping completed. Total products processed: {total_products_processed}")
-    logger.info(f"Categories summary - Total: {len(categories)}, Successful: {successful_categories}, Failed: {failed_categories}")
+    # logger.info("Fetching Rimi categories...")
+    # categories = get_rimi_categories(headers, user_agent)
+    # add_rimi_categories(db, categories)
+    top_categories = category_service.get_top_categories(db)
+    logger.info(f"Found {len(top_categories)} Rimi categories")
+
+    for category_index, category in enumerate(top_categories, 1):
+        logger.info(f"Processing Rimi category {category_index}/{len(top_categories)}: {category.name}")
+        category_items = get_rimi_items_by_category(category, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category.name}")
+
+        for item_index, item in enumerate(category_items, 1):
+            logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
+            print(item['url'])
+            process_item(db, store, item)
 
 @retry(
     stop=stop_after_attempt(3),
@@ -467,174 +524,56 @@ def get_rimi_categories(headers, user_agent):
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         logger.debug("Chrome driver initialized successfully")
-        
-        # Try multiple URLs to get categories
-        urls_to_try = [
-            'https://www.rimi.ee/epood/ee',
-            'https://www.rimi.ee/epood/ee/categories',
-            'https://www.rimi.ee/epood/ee/products'
-        ]
-        
-        for url_index, url in enumerate(urls_to_try):
-            logger.debug(f"Trying URL {url_index + 1}/{len(urls_to_try)}: {url}")
-            driver.get(url)
-            
-            # First wait for page to basically load
-            time.sleep(10)
-            
-            # More reliable wait - wait for page to be fully loaded
-            WebDriverWait(driver, 30).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
-            
-            # Try to handle cookie dialog if it appears
-            try:
-                cookie_dialog = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.ID, "CybotCookiebotDialog"))
-                )
-                if cookie_dialog:
-                    driver.execute_script("document.getElementById('CybotCookiebotDialog').remove()")
-                    logger.debug("Removed cookie dialog")
-            except Exception as e:
-                logger.debug(f"Cookie dialog handling: {str(e)}")
-            
-            # Try multiple selectors to find categories
-            selectors = [
-                ".category-menu button.trigger",
-                ".category-navigation a[href*='/c/']",
-                "a[href*='/c/']",
-                ".category-menu__item a",
-                ".category-list a",
-                "nav a[href*='/c/']",
-                ".main-navigation a[href*='/c/']"
-            ]
-            
-            category_elements = []
-            for selector in selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements and len(elements) > 0:
-                        logger.debug(f"Found {len(elements)} category elements with selector: {selector}")
-                        category_elements = elements
-                        break
-                except Exception as e:
-                    logger.warning(f"Error finding elements with selector {selector}: {str(e)}")
-            
-            if category_elements:
-                logger.debug(f"Found {len(category_elements)} category elements")
-                break
-            
-            logger.warning(f"No category elements found with URL {url}, trying next URL if available")
-        
-        # Process found category elements
-        for element in category_elements:
-            try:
-                href = element.get_attribute('href')
-                # Different ways to get the name depending on element type
-                try:
-                    name = element.find_element(By.CSS_SELECTOR, "span.name").text.strip()
-                except:
-                    name = element.text.strip()
-                
-                if href and name and '/c/' in href:
-                    category_id = href.split('/c/')[-1] if '/c/' in href else None
-                    
-                    if category_id:
-                        categories.append({
-                            'title': name,
-                            'link': href,
-                            'id': category_id.strip()
-                        })
-                        logger.debug(f"Added category: {name} (ID: {category_id})")
-            except Exception as e:
-                logger.warning(f"Error processing category element: {str(e)}")
-                continue
 
-        if not categories:
-            logger.debug("Trying JavaScript method to get categories")
-            # Try multiple JavaScript approaches
-            js_scripts = [
-                """
-                return Array.from(document.querySelectorAll('.category-menu button.trigger')).map(el => {
-                    const href = el.getAttribute('href');
-                    const categoryId = href ? href.split('/c/').pop().trim() : null;
-                    return {
-                        title: el.querySelector('span.name').textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat.title && cat.link && cat.id);
-                """,
-                """
-                return Array.from(document.querySelectorAll('a[href*="/c/"]')).map(el => {
-                    const href = el.getAttribute('href');
-                    const categoryId = href ? href.split('/c/').pop().trim() : null;
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat.title && cat.link && cat.id);
-                """,
-                """
-                // Try to find categories in any navigation element
-                return Array.from(document.querySelectorAll('nav a, .navigation a, .menu a')).map(el => {
-                    const href = el.getAttribute('href');
-                    if (!href || !href.includes('/c/')) return null;
-                    
-                    const categoryId = href.split('/c/').pop().trim();
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat && cat.title && cat.link && cat.id);
-                """,
-                """
-                // Last resort - try to find any links that might be categories
-                return Array.from(document.querySelectorAll('a')).map(el => {
-                    const href = el.getAttribute('href');
-                    if (!href || !href.includes('/c/')) return null;
-                    
-                    const categoryId = href.split('/c/').pop().trim();
-                    return {
-                        title: el.textContent.trim(),
-                        link: href,
-                        id: categoryId
-                    };
-                }).filter(cat => cat && cat.title && cat.link && cat.id);
-                """
-            ]
-            
-            for script in js_scripts:
-                try:
-                    categories_js = driver.execute_script(script)
-                    
-                    if categories_js and len(categories_js) > 0:
-                        categories = categories_js
-                        logger.debug(f"Found {len(categories)} categories using JavaScript")
-                        break
-                except Exception as e:
-                    logger.warning(f"JavaScript extraction attempt failed: {str(e)}")
-        
-        # If still no categories, try hardcoded fallback categories
-        if not categories:
-            logger.warning("No categories found through normal methods, using fallback categories")
-            fallback_categories = [
-                {"title": "Puu- ja köögiviljad", "link": "/epood/ee/c/puu-ja-koogiviljad", "id": "puu-ja-koogiviljad"},
-                {"title": "Liha ja kala", "link": "/epood/ee/c/liha-ja-kala", "id": "liha-ja-kala"},
-                {"title": "Piimatooted ja munad", "link": "/epood/ee/c/piimatooted-ja-munad", "id": "piimatooted-ja-munad"},
-                {"title": "Leivad ja saiad", "link": "/epood/ee/c/leivad-ja-saiad", "id": "leivad-ja-saiad"},
-                {"title": "Valmistoit", "link": "/epood/ee/c/valmistoit", "id": "valmistoit"},
-                {"title": "Külmutatud toit", "link": "/epood/ee/c/kulmutatud-toit", "id": "kulmutatud-toit"},
-                {"title": "Kuivained ja hommikusöök", "link": "/epood/ee/c/kuivained-ja-hommikusook", "id": "kuivained-ja-hommikusook"},
-                {"title": "Joogid", "link": "/epood/ee/c/joogid", "id": "joogid"},
-                {"title": "Maiustused ja snäkid", "link": "/epood/ee/c/maiustused-ja-snakid", "id": "maiustused-ja-snakid"}
-            ]
-            categories = fallback_categories
-            
+        url = 'https://www.rimi.ee/epood/ee'
+
+        driver.get(url)
+
+        # Wait for page to be fully loaded
+        WebDriverWait(driver, 30).until(
+            EC.visibility_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        # Try to handle cookie dialog if it appears
+        try:
+            cookie_dialog = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
+            )
+            cookie_dialog.click()
+        except Exception as e:
+            logger.debug(f"Cookie dialog handling: {str(e)}")
+
+        driver.find_element(By.CLASS_NAME, 'category-menu').click()
+
+        categories_selector = "category-list-item"
+        categories = []
+
+        def find_rimi_categories_recursively(depth = 0):
+            menu = driver.find_elements(By.CLASS_NAME, 'category-menu')[depth]
+            found_categories = menu.find_elements(By.CLASS_NAME, categories_selector)
+            nested_categories = []
+
+            for category in found_categories:
+                found_text_elements = category.find_elements(By.CSS_SELECTOR, "span.name")
+                if not len(found_text_elements): continue
+
+                category_name = found_text_elements[0].text.strip()
+                category_dict = {"name": category_name, "subcategories": []}
+
+                found_button_elements = category.find_elements(By.TAG_NAME, 'button')
+                if found_button_elements:
+                    found_button_elements[0].click()
+                    category_dict["subcategories"] = find_rimi_categories_recursively(depth + 1)
+                    category_dict["url"] = found_button_elements[0].get_attribute('href')
+
+                nested_categories.append(category_dict)
+
+            return nested_categories
+
+        categories = find_rimi_categories_recursively()
+
         return categories
-        
+
     except Exception as e:
         logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
         return []
@@ -646,6 +585,7 @@ def get_rimi_categories(headers, user_agent):
                 logger.debug("Chrome driver closed successfully")
         except Exception as e:
             logger.error(f"Error closing driver: {str(e)}")
+
 
 @retry(
     stop=stop_after_attempt(3),
@@ -674,7 +614,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
         logger.debug("Chrome driver successfully initialized")
 
         while page <= max_pages:  # Add a maximum page limit to prevent infinite loops
-            url = f"https://www.rimi.ee{category['link']}?pageSize=100&currentPage={page}"
+            url = f"https://www.rimi.ee{category.url}?pageSize=100&currentPage={page}"
             logger.debug(f"Loading page: {url}")
 
             try:
@@ -856,16 +796,22 @@ def get_rimi_items_by_category(category, headers, user_agent):
                         price = product.get('price', '')
                         if not price:
                             continue
+
+
                             
                         product_id = product.get('id', '')
-                        image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_limit,dpr_3.0,f_auto,q_auto:low,w_250/d_ecommerce:backend-fallback.png/MAT_{product_id}_PCE_EE"
+                        image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_fit,f_auto,h_960,q_auto,w_960/d_ecommerce:backend-fallback.png/MAT_{product_id}_PCE_EE"
+                        product_url = f"https://www.rimi.ee/epood/ee/tooted/p/{product_id}"
 
                         result_products.append({
                             'name': name,
                             'price': price,
                             'image': image_url,
                             'weight_value': weight_value,
-                            'unit_name': unit_name
+                            'unit_name': unit_name,
+                            'category_path_url': category.url,
+                            'category_id': category.category_id,
+                            'url': product_url
                         })
                         valid_products_count += 1
                     except Exception as e:
@@ -899,80 +845,6 @@ def get_rimi_items_by_category(category, headers, user_agent):
 
     logger.debug(f"Final total products collected: {len(result_products)}")
     return result_products
-
-def process_item(db: Session, store, item):
-    logger.debug(f"""
-    Processing raw item data:
-    - Name: {item['name']}
-    - Price: {item['price']}
-    - Image: {item['image']}
-    - Category: {item.get('category', 'N/A')}
-    - Weight Value: {item.get('weight_value', 'N/A')}
-    - Unit Name: {item.get('unit_name', 'N/A')}
-    """)
-
-    weight_value = item.get('weight_value')
-    unit_name = item.get('unit_name')
-    
-    unit = None
-    if weight_value and unit_name:
-        unit = unit_service.get_by_name(db, name=unit_name)
-        if not unit:
-            unit_data = schemas.UnitCreate(
-                name=unit_name,
-                conversion_factor=get_conversion_factor(unit_name)
-            )
-            unit = unit_service.create(db, unit=unit_data)
-            logger.debug(f"Created new unit: {unit_name} with factor {get_conversion_factor(unit_name)}")
-
-    # Create or update ProductStoreData entry
-    existing_psd = product_store_data_service.get_by_store_product_name_and_store(
-        db,
-        store_product_name=item['name'],
-        store_id=store.store_id
-    )
-
-    psd_data = schemas.ProductStoreDataCreate(
-        product_id=None,  # Initially null, will be set by matcher
-        store_id=store.store_id,
-        price=item['price'],
-        store_product_name=item['name'],
-        store_weight_value=weight_value,
-        store_image_url=item['image'],
-        store_unit_id=unit.unit_id if unit else None
-    )
-
-    if existing_psd:
-        old_price = existing_psd.price
-        # If price has changed, save the old price to history
-        if float(old_price) != float(item['price']):
-            price_history = schemas.ProductPriceHistoryCreate(
-                product_store_id=existing_psd.product_store_id,
-                price=old_price
-            )
-            product_price_history_service.create(db, price_history)
-        
-        existing_psd.price = item['price']
-        existing_psd.last_updated = time.strftime('%Y-%m-%d %H:%M:%S')
-        db.commit()
-        logger.debug(f"""
-        Updated existing store data:
-        - Product: {item['name']}
-        - Old price: {old_price}
-        - New price: {item['price']}
-        - Last updated: {existing_psd.last_updated}
-        """)
-    else:
-        new_psd = product_store_data_service.create(db, psd=psd_data)
-        logger.debug(f"""
-        Created new store data:
-        - Product: {item['name']}
-        - Price: {item['price']}
-        - Store: {store.name}
-        - Product Store ID: {new_psd.product_store_id}
-        """)
-
-    logger.debug("=" * 50)
 
 def parse_weight(weight_str):
     if not weight_str:
@@ -1253,3 +1125,23 @@ def get_prisma_items_by_category(category, headers, user_agent):
     
     logger.debug(f"Total products collected for category {category['name']}: {len(result_products)}")
     return result_products
+
+def add_rimi_categories(db: Session, categories, parent_id=None):
+    for category in categories:
+        existing_category = category_service.get_by_name(db, name=category['name'])
+        if not existing_category:
+            category_data = schemas.CategoryCreate(
+                name=category['name'],
+                parent_id=parent_id,
+                url=category['url'] if 'url' in category else None
+            )
+
+            db_category = category_service.create(db, category_data)
+            logger.debug(f"Added category: {db_category.name} with ID: {db_category.category_id}")
+
+            if category['subcategories']:
+                add_rimi_categories(db, category['subcategories'], parent_id=db_category.category_id)
+        else:
+            logger.debug(f"Category '{category['name']}' already exists with ID: {existing_category.category_id}")
+
+
