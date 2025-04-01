@@ -33,5 +33,7 @@ venv.bak/
 .pytest_cache/
 .coverage
 htmlcov/
-/shell.nix
-/logs/*
+shell.nix
+nix.shell
+logs
+/logs/
