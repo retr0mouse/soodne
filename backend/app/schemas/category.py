@@ -7,6 +7,7 @@ class CategoryBase(BaseModel):
     description: Optional[str] = None
     parent_id: Optional[int] = None
     url: Optional[str] = None
+    store_id: Optional[int] = None
 
 class CategoryCreate(CategoryBase):
     pass

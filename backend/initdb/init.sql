@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS categories (
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
     url VARCHAR(255),
+    store_id INTEGER,
     CONSTRAINT fk_parent_category
         FOREIGN KEY (parent_id)
             REFERENCES categories (category_id)

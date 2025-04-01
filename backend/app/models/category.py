@@ -9,3 +9,4 @@ class Category(Base):
     description = Column(Text, nullable=True)
     parent_id = Column(Integer, ForeignKey("categories.category_id"), nullable=True)
     url = Column(String(255), nullable=True)
+    store_id = Column(Integer, ForeignKey("stores.store_id"), nullable=True)
