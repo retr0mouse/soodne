@@ -49,10 +49,10 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
-            # "Barbora": "https://barbora.ee",
+            "Barbora": "https://barbora.ee",
             "Rimi": "https://www.rimi.ee/epood/ee",
-            # "Selver": "https://www.selver.ee",
-            # "Prisma": "https://www.prismamarket.ee"
+            "Selver": "https://www.selver.ee",
+            "Prisma": "https://www.prismamarket.ee"
         }
 
         for store_name, url in stores.items():
@@ -109,7 +109,7 @@ def process_store(db: Session, store):
         case _:
             logger.info(f"No scraper for store {store} is implemented")
 
-def process_barbora_category_path(db: Session, category_path_url):
+def add_barbora_categories_to_db_by_url(db: Session, category_path_url, store_id):
     """
     Process category hierarchy from category_path_url.
     Returns the leaf category (the most specific one).
@@ -121,7 +121,7 @@ def process_barbora_category_path(db: Session, category_path_url):
     parent_id = None
     last_category = None
 
-    for cat_name in categories:
+    for index, cat_name in enumerate(categories, 1):
         if not cat_name:
             continue
 
@@ -135,7 +135,9 @@ def process_barbora_category_path(db: Session, category_path_url):
             # Create new category
             category_data = schemas.CategoryCreate(
                 name=display_name,
-                parent_id=parent_id
+                parent_id=parent_id,
+                store_id=store_id,
+                url="https://barbora.ee/" + '/'.join(categories[0:index])
             )
             category = category_service.create(db, category_data)
             logger.debug(f"Created new category: {display_name} with parent_id: {parent_id}")
@@ -232,12 +234,13 @@ def process_item(db: Session, store, item):
 def get_all_barbora_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Barbora categories...")
     categories = get_barbora_categories(headers, user_agent)
+
     logger.info(f"Found {len(categories)} Barbora categories")
 
     for category_index, category in enumerate(categories, 1):
         logger.info(f"Processing Barbora category {category_index}/{len(categories)}: {category['title']}")
 
-        category_items = get_barbora_items_by_category(db, category['link'], headers, user_agent)
+        category_items = get_barbora_items_by_category(db, category['link'], store.store_id, headers, user_agent)
         logger.info(f"Found {len(category_items)} items in category {category['title']}")
 
         for item_index, item in enumerate(category_items, 1):
@@ -290,11 +293,11 @@ def get_barbora_categories(headers, user_agent):
         
         logger.info(f"Found {len(result_categories)} categories")
         return result_categories
-        
+
     except Exception as e:
         logger.error(f"Error getting Barbora categories: {str(e)}", exc_info=True)
         return []
-        
+
     finally:
         try:
             if 'driver' in locals():
@@ -307,7 +310,7 @@ def get_barbora_categories(headers, user_agent):
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
-def get_barbora_items_by_category(db: Session, category_link, headers, user_agent):
+def get_barbora_items_by_category(db: Session, category_link, store_id, headers, user_agent):
     chrome_options = Options()
     chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
@@ -361,7 +364,7 @@ def get_barbora_items_by_category(db: Session, category_link, headers, user_agen
 
                         price = product['price']
                         image_url = product['image']
-                        category = process_barbora_category_path(db, product.get('category_path_url'))
+                        category = add_barbora_categories_to_db_by_url(db, product.get('category_path_url'), store_id)
 
                         url = product.get('Url', None)
                         store_url = "https://barbora.ee"
@@ -483,10 +486,10 @@ def get_conversion_factor(unit_name):
     return unit_conversions.get(unit_name.lower(), 1)
 
 def get_all_rimi_items(db: Session, store, headers, user_agent):
-    # logger.info("Fetching Rimi categories...")
-    # categories = get_rimi_categories(headers, user_agent)
-    # add_rimi_categories(db, categories)
-    top_categories = category_service.get_top_categories(db)
+    logger.info("Fetching Rimi categories...")
+    categories = get_rimi_categories(headers, user_agent)
+    add_categories_to_db(db, categories, store.store_id)
+    top_categories = category_service.get_top_categories(db, store.store_id)
     logger.info(f"Found {len(top_categories)} Rimi categories")
 
     for category_index, category in enumerate(top_categories, 1):
@@ -503,7 +506,7 @@ def get_all_rimi_items(db: Session, store, headers, user_agent):
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
-def get_rimi_categories(headers, user_agent):
+def get_rimi_categories(headers: object, user_agent: object):
     chrome_options = Options()
     chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--no-sandbox')
@@ -514,24 +517,18 @@ def get_rimi_categories(headers, user_agent):
     chrome_options.add_argument('--disable-blink-features=AutomationControlled')
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
-    
-    categories = []
-    driver = None
-    
+
     try:
-        logger.debug("Initializing Chrome driver...")
         service = Service()
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        logger.debug("Chrome driver initialized successfully")
 
-        url = 'https://www.rimi.ee/epood/ee'
-
+        url = 'https://www.rimi.ee/epood/ee/parimad-pakkumised'
+        logger.debug(f"Navigating to URL: {url}")
         driver.get(url)
 
-        # Wait for page to be fully loaded
-        WebDriverWait(driver, 30).until(
-            EC.visibility_of_element_located((By.TAG_NAME, "body"))
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
 
         # Try to handle cookie dialog if it appears
@@ -546,7 +543,6 @@ def get_rimi_categories(headers, user_agent):
         driver.find_element(By.CLASS_NAME, 'category-menu').click()
 
         categories_selector = "category-list-item"
-        categories = []
 
         def find_rimi_categories_recursively(depth = 0):
             menu = driver.find_elements(By.CLASS_NAME, 'category-menu')[depth]
@@ -564,28 +560,25 @@ def get_rimi_categories(headers, user_agent):
                 if found_button_elements:
                     found_button_elements[0].click()
                     category_dict["subcategories"] = find_rimi_categories_recursively(depth + 1)
-                    category_dict["url"] = found_button_elements[0].get_attribute('href')
-
+                    category_dict["url"] = 'https://rimi.ee' + found_button_elements[0].get_attribute('href')
+                found_link_elements = category.find_elements(By.TAG_NAME, 'a')
+                if found_link_elements:
+                    category_dict["url"] = found_link_elements[0].get_attribute('href')
                 nested_categories.append(category_dict)
 
             return nested_categories
-
-        categories = find_rimi_categories_recursively()
-
-        return categories
+        return find_rimi_categories_recursively()
 
     except Exception as e:
         logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
         return []
-        
     finally:
         try:
-            if driver:
+            if 'driver' in locals():
                 driver.quit()
-                logger.debug("Chrome driver closed successfully")
+                logger.debug("Chrome driver successfully closed")
         except Exception as e:
-            logger.error(f"Error closing driver: {str(e)}")
-
+            logger.error(f"Error while closing driver: {str(e)}")
 
 @retry(
     stop=stop_after_attempt(3),
@@ -614,7 +607,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
         logger.debug("Chrome driver successfully initialized")
 
         while page <= max_pages:  # Add a maximum page limit to prevent infinite loops
-            url = f"https://www.rimi.ee{category.url}?pageSize=100&currentPage={page}"
+            url = f"{category.url}?pageSize=100&currentPage={page}"
             logger.debug(f"Loading page: {url}")
 
             try:
@@ -798,7 +791,7 @@ def get_rimi_items_by_category(category, headers, user_agent):
                             continue
 
 
-                            
+
                         product_id = product.get('id', '')
                         image_url = f"https://rimibaltic-res.cloudinary.com/image/upload/b_white,c_fit,f_auto,h_960,q_auto,w_960/d_ecommerce:backend-fallback.png/MAT_{product_id}_PCE_EE"
                         product_url = f"https://www.rimi.ee/epood/ee/tooted/p/{product_id}"
@@ -871,12 +864,20 @@ def get_conversion_factor(unit_name):
 def get_all_selver_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Selver categories...")
     categories = get_selver_categories(headers, user_agent)
+    add_categories_to_db(db, categories, store.store_id)
+    top_categories = category_service.get_top_categories(db, store.store_id)
+    logger.info(f"Found {len(top_categories)} Rimi categories")
+    for category_index, category in enumerate(top_categories, 1):
+        logger.info(f"Processing Selver category {category_index}/{len(top_categories)}: {category.name}")
+        # Weird logic to get the list of category ids
+        category_ids = []
+        for c in categories:
+            if c['name'] == category.name:
+                category_ids = c['all_category_ids']
+                break
 
-    for category_index, category in enumerate(categories, 1):
-        logger.info(f"Processing Selver category {category_index}/{len(categories)}: {category['name']}")
-
-        category_items = get_selver_items_by_category(category, headers, user_agent)
-        logger.info(f"Found {len(category_items)} items in category {category['name']}")
+        category_items = get_selver_items_by_category(category, category_ids, headers, user_agent)
+        logger.info(f"Found {len(category_items)} items in category {category.name}")
 
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
@@ -900,12 +901,12 @@ def get_selver_categories(headers, user_agent):
 
                 category = {
                     'name': current_category.get('name'),
-                    'url_path': current_category.get('url_path'),
-                    'id': current_category.get('id'),
-                    'all_categories': getSubcategories(current_category)
+                    'url': 'https://www.selver.ee/' + current_category.get('url_path'),
+                    'subcategories': get_selver_subcategories(current_category),
+                    'all_category_ids': get_selver_category_ids(current_category)
                 }
                 categories.append(category)
-                logger.debug(f"Added category: {category['name']} with URL path: {category['url_path']}")
+                logger.debug(f"Added category: {category['name']} with URL path: {category['url']}")
         
         logger.info(f"Found {len(categories)} categories from Selver")
         return categories
@@ -914,32 +915,47 @@ def get_selver_categories(headers, user_agent):
         return []
 
 
-# returns an array containing parent category and all subcategory ids
-def getSubcategories(category):
+# returns an array containing all subcategories
+def get_selver_subcategories(category):
+    subcategories = []
+
+    if category.get('children_data'):
+        for child in category['children_data']:
+            subcategory = {
+                'name': child['name'],
+                'url': 'https://www.selver.ee/' + child['url_path'],
+                'subcategories': get_selver_subcategories(child),  # Recursively get subcategories
+            }
+            subcategories.append(subcategory)
+
+    return subcategories
+
+def get_selver_category_ids(category):
     category_ids = [category['id']]
 
     if category['children_data']:
         for child in category['children_data']:
-            category_ids.extend(getSubcategories(child))
+            category_ids.extend(get_selver_category_ids(child))
     return category_ids
+
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
-def get_selver_items_by_category(category, headers, user_agent):
+def get_selver_items_by_category(category, category_ids, headers, user_agent):
     result_products = []
     
     try:
         api_url = "https://www.selver.ee/api/catalog/vue_storefront_catalog_et/product/_search"
         payload = {
-            "_source": ["name", "prices", "media_gallery", "product_volume"],
+            "_source": ["name", "prices", "media_gallery", "product_volume", "url_path"],
             "query": {
                 "bool": {
                     "filter": {
                         "bool": {
                             "must": [
-                                {"terms": {"category_ids": category['all_categories']}}
+                                {"terms": {"category_ids": category_ids}}
                             ]
                         }
                     }
@@ -948,7 +964,7 @@ def get_selver_items_by_category(category, headers, user_agent):
             "size": 10000
         }
 
-        logger.debug(f"Requesting Selver products from API for category: {category['name']} (ID: {category['id']})")
+        logger.debug(f"Requesting Selver products from API for category: {category.name}")
         
         response = requests.post(api_url, json=payload, headers=headers)
         
@@ -956,16 +972,18 @@ def get_selver_items_by_category(category, headers, user_agent):
         
         if 'hits' in data and 'hits' in data['hits']:
             products_data = data['hits']['hits']
-            logger.debug(f"Found {len(products_data)} products from API for category: {category['name']}")
+            logger.debug(f"Found {len(products_data)} products from API for category: {category.name}")
             
             for product in products_data:
                 try:
                     current_product = product.get('_source')
+                    print(current_product)
                     name = current_product.get('name')
                     price = current_product['prices'][0]['final_price']
                     image_path = current_product['media_gallery'][0]['image']
                     image_url = f"https://www.selver.ee/img/800/800/resize{image_path}" if image_path else None
                     weight_value, unit_name = parse_product_details(current_product['product_volume'])
+                    product_url = f"https://www.selver.ee/{current_product['url_path']}"
 
                     # Create product data
                     result_products.append({
@@ -973,7 +991,10 @@ def get_selver_items_by_category(category, headers, user_agent):
                         'price': price,
                         'image': image_url,
                         'weight_value': weight_value,
-                        'unit_name': unit_name
+                        'unit_name': unit_name,
+                        'category_path_url': category.url,
+                        'category_id': category.category_id,
+                        'url': product_url
                     })
                     
                     logger.debug(f"""
@@ -983,6 +1004,9 @@ def get_selver_items_by_category(category, headers, user_agent):
                         - Image: {image_url}
                         - Weight Value: {weight_value}
                         - Unit Name: {unit_name}
+                        - Category Url: {category.url}
+                        - Category Id: {category.category_id},
+                        - Url: {product_url}
                     """)
                     
                 except Exception as e:
@@ -991,20 +1015,21 @@ def get_selver_items_by_category(category, headers, user_agent):
         
     except Exception as e:
         logger.error(f"Error fetching products from Selver API: {str(e)}", exc_info=True)
-    
-    logger.debug(f"Final total products collected for category {category['name']}: {len(result_products)}")
+
+    logger.debug(f"Final total products collected for category {category.name}: {len(result_products)}")
     return result_products
 
 def get_all_prisma_items(db: Session, store, headers, user_agent):
     logger.info("Fetching Prisma categories...")
-    categories = get_prisma_categories(headers, user_agent)
-    logger.info(f"Found {len(categories)} Prisma categories")
-    
-    for category_index, category in enumerate(categories, 1):
-        logger.info(f"Processing Prisma category {category_index}/{len(categories)}: {category['name']}")
+    add_categories_to_db(db, get_prisma_categories(headers, user_agent), store.store_id)
+    top_categories = category_service.get_top_categories(db, store.store_id)
+    logger.info(f"Found {len(top_categories)} Prisma categories")
+
+    for category_index, category in enumerate(top_categories, 1):
+        logger.info(f"Processing Prisma category {category_index}/{len(top_categories)}: {category.name}")
         category_items = get_prisma_items_by_category(category, headers, user_agent)
-        logger.info(f"Found {len(category_items)} items in category {category['name']}")
-        
+        logger.info(f"Found {len(category_items)} items in category {category.name}")
+
         for item_index, item in enumerate(category_items, 1):
             logger.info(f"Processing item {item_index}/{len(category_items)}: {item['name']}")
             process_item(db, store, item)
@@ -1031,16 +1056,18 @@ def get_prisma_categories(headers, user_agent):
 
         data = response.json()
         categories = []
-
-        if 'data' in data and 'store' in data['data'] and 'navigation' in data['data']['store']:
+        found_categories = data['data']['store']['navigation']
+        if found_categories:
             # skip the first 2 categories ("Aktuaalne", "Food Market")
-            data['data']['store']['navigation'].pop(0)
-            data['data']['store']['navigation'].pop(0)
-            for current_category in data['data']['store']['navigation']:
+            found_categories.pop(0)
+            found_categories.pop(0)
+            for current_category in found_categories:
                 category = {
                     'name': current_category.get('name'),
                     'slug': current_category.get('slug'),
-                    'id': current_category.get('id')
+                    'id': current_category.get('id'),
+                    'url': 'https://www.prismamarket.ee/tooted/' + current_category.get('slug'),
+                    'subcategories': get_prisma_subcategories(current_category)
                 }
                 categories.append(category)
                 logger.debug(f"Added category: {category['name']} ")
@@ -1052,6 +1079,22 @@ def get_prisma_categories(headers, user_agent):
         logger.error(f"Error getting Prisma categories: {str(e)}", exc_info=True)
         return []
 
+def get_prisma_subcategories(category):
+    subcategories = []
+
+    if category.get('children'):
+        for child in category['children']:
+            subcategory = {
+                'name': child.get('name'),
+                'slug': child.get('slug'),
+                'id': child.get('id'),
+                'url': 'https://www.prismamarket.ee/tooted/' + child.get('slug'),
+                'subcategories': get_selver_subcategories(child),  # Recursively get subcategories
+            }
+            subcategories.append(subcategory)
+
+    return subcategories
+
 def get_prisma_items_by_category(category, headers, user_agent):
     result_products = []
     
@@ -1059,6 +1102,7 @@ def get_prisma_items_by_category(category, headers, user_agent):
         offset = 0
         while True:
             base_url = "https://graphql-api.prismamarket.ee"
+            slug = category.url.replace("https://www.prismamarket.ee/tooted/", "")
             body = {
                 "operationName": "RemoteFilteredProducts",
                 "variables": {
@@ -1067,7 +1111,7 @@ def get_prisma_items_by_category(category, headers, user_agent):
                     "from": offset,
                     "queryString": "",
                     "searchProvider": "loop54",
-                    "slug": category['slug'],
+                    "slug": slug,
                     "storeId": "542860184"
                 },
                 "extensions": {
@@ -1078,7 +1122,7 @@ def get_prisma_items_by_category(category, headers, user_agent):
                 }
             }
 
-            logger.debug(f"Requesting Prisma products from API for category: {category['name']} (ID: {category['id']}, SLUG: {category['slug']})")
+            logger.debug(f"Requesting Prisma products from API for category: {category.name} (SLUG: {slug})")
 
             response = requests.post(base_url, json=body, headers=headers)
             response.raise_for_status()
@@ -1086,7 +1130,7 @@ def get_prisma_items_by_category(category, headers, user_agent):
             data = response.json()
             products = data['data']['store']['products']['items']
             if len(products) > 0:
-                logger.debug(f"Found {len(products)} products from API for category: {category['name']}")
+                logger.debug(f"Found {len(products)} products from API for category: {category.name}")
 
                 for product in products:
                     try:
@@ -1103,7 +1147,9 @@ def get_prisma_items_by_category(category, headers, user_agent):
                             'price': price,
                             'image': image_url,
                             'weight_value': weight_value,
-                            'unit_name': unit_name
+                            'unit_name': unit_name,
+                            'url': f"https://www.prismamarket.ee/toode/{product['slug']}/{product['id']}",
+                            'category_id': category.category_id
                         })
 
                         logger.debug(f"""
@@ -1113,6 +1159,7 @@ def get_prisma_items_by_category(category, headers, user_agent):
                                     - Image: {image_url}
                                     - Weight Value: {weight_value}
                                     - Unit Name: {unit_name}
+                                    - Category Id': {category.category_id}
                                 """)
                     except Exception as e:
                         logger.warning(f"Error parsing product: {str(e)}")
@@ -1123,25 +1170,28 @@ def get_prisma_items_by_category(category, headers, user_agent):
     except Exception as e:
         logger.error(f"Error in get_prisma_items_by_category: {str(e)}", exc_info=True)
     
-    logger.debug(f"Total products collected for category {category['name']}: {len(result_products)}")
+    logger.debug(f"Total products collected for category {category.name}: {len(result_products)}")
     return result_products
 
-def add_rimi_categories(db: Session, categories, parent_id=None):
+def add_categories_to_db(db: Session, categories, store_id, parent_id=None):
+    print(f"store id: {store_id}")
+    print(f"categories: {categories}")
     for category in categories:
-        existing_category = category_service.get_by_name(db, name=category['name'])
+        existing_category = category_service.get_by_store_id_and_name(db, store_id=store_id, name=category['name'])
         if not existing_category:
             category_data = schemas.CategoryCreate(
                 name=category['name'],
                 parent_id=parent_id,
-                url=category['url'] if 'url' in category else None
+                url=category['url'] if 'url' in category else None,
+                store_id=store_id
             )
 
             db_category = category_service.create(db, category_data)
-            logger.debug(f"Added category: {db_category.name} with ID: {db_category.category_id}")
+            print(f"Added category: {db_category.name} with Category ID: {db_category.category_id} and Store ID: {store_id}")
 
             if category['subcategories']:
-                add_rimi_categories(db, category['subcategories'], parent_id=db_category.category_id)
+                add_categories_to_db(db, category['subcategories'], store_id, parent_id=db_category.category_id)
         else:
-            logger.debug(f"Category '{category['name']}' already exists with ID: {existing_category.category_id}")
+            logger.debug(f"Category '{category['name']}' already exists")
 
 
