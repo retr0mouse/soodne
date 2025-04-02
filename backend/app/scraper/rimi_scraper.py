@@ -1,4 +1,5 @@
 import time
+
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.wait import WebDriverWait
@@ -7,7 +8,7 @@ from tenacity import stop_after_attempt, wait_exponential, retry
 from app.core.logger import setup_logger
 from app.utils.parse import parse_product_details, random_delay
 
-logger = setup_logger("scraper")
+logger = setup_logger("rimi")
 logger.setLevel("DEBUG")
 
 @retry(
@@ -15,54 +16,57 @@ logger.setLevel("DEBUG")
     wait=wait_exponential(multiplier=1, min=4, max=10)
 )
 def get_rimi_categories(driver):
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-    url = 'https://www.rimi.ee/epood/ee/parimad-pakkumised'
-    logger.debug(f"Navigating to URL: {url}")
-    driver.get(url)
-
-    WebDriverWait(driver, 20).until(
-        expected_conditions.presence_of_element_located((By.TAG_NAME, "body"))
-    )
-
-    # Try to handle cookie dialog if it appears
     try:
-        cookie_dialog = WebDriverWait(driver, 5).until(
-            expected_conditions.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        url = 'https://www.rimi.ee/epood/ee/parimad-pakkumised'
+        logger.debug(f"Navigating to URL: {url}")
+        driver.get(url)
+
+        WebDriverWait(driver, 20).until(
+            expected_conditions.presence_of_element_located((By.TAG_NAME, "body"))
         )
-        cookie_dialog.click()
+
+        # Try to handle cookie dialog if it appears
+        try:
+            cookie_dialog = WebDriverWait(driver, 5).until(
+                expected_conditions.element_to_be_clickable((By.ID, "CybotCookiebotDialogBodyButtonDecline"))
+            )
+            cookie_dialog.click()
+        except Exception as e:
+            logger.debug(f"Cookie dialog handling error: {str(e)}")
+
+        driver.find_element(By.CLASS_NAME, 'category-menu').click()
+
+        categories_selector = "category-list-item"
+
+        def find_rimi_categories_recursively(depth=0):
+            menu = driver.find_elements(By.CLASS_NAME, 'category-menu')[depth]
+            found_categories = menu.find_elements(By.CLASS_NAME, categories_selector)
+            nested_categories = []
+
+            for category in found_categories:
+                found_text_elements = category.find_elements(By.CSS_SELECTOR, "span.name")
+                if not len(found_text_elements): continue
+
+                category_name = found_text_elements[0].text.strip()
+                category_dict = {"name": category_name, "subcategories": []}
+
+                found_button_elements = category.find_elements(By.TAG_NAME, 'button')
+                if found_button_elements:
+                    found_button_elements[0].click()
+                    category_dict["subcategories"] = find_rimi_categories_recursively(depth + 1)
+                    category_dict["url"] = 'https://rimi.ee' + found_button_elements[0].get_attribute('href')
+                found_link_elements = category.find_elements(By.TAG_NAME, 'a')
+                if found_link_elements:
+                    category_dict["url"] = found_link_elements[0].get_attribute('href')
+                nested_categories.append(category_dict)
+
+            return nested_categories
+        return find_rimi_categories_recursively()
     except Exception as e:
-        logger.debug(f"Cookie dialog handling: {str(e)}")
-
-    driver.find_element(By.CLASS_NAME, 'category-menu').click()
-
-    categories_selector = "category-list-item"
-
-    def find_rimi_categories_recursively(depth=0):
-        menu = driver.find_elements(By.CLASS_NAME, 'category-menu')[depth]
-        found_categories = menu.find_elements(By.CLASS_NAME, categories_selector)
-        nested_categories = []
-
-        for category in found_categories:
-            found_text_elements = category.find_elements(By.CSS_SELECTOR, "span.name")
-            if not len(found_text_elements): continue
-
-            category_name = found_text_elements[0].text.strip()
-            category_dict = {"name": category_name, "subcategories": []}
-
-            found_button_elements = category.find_elements(By.TAG_NAME, 'button')
-            if found_button_elements:
-                found_button_elements[0].click()
-                category_dict["subcategories"] = find_rimi_categories_recursively(depth + 1)
-                category_dict["url"] = 'https://rimi.ee' + found_button_elements[0].get_attribute('href')
-            found_link_elements = category.find_elements(By.TAG_NAME, 'a')
-            if found_link_elements:
-                category_dict["url"] = found_link_elements[0].get_attribute('href')
-            nested_categories.append(category_dict)
-
-        return nested_categories
-
-    return find_rimi_categories_recursively()
+        logger.error(f"Error getting Rimi categories: {str(e)}", exc_info=True)
+        return []
 
 
 @retry(
@@ -73,12 +77,11 @@ def get_rimi_items_by_category(category, driver):
 
     result_products = []
     page = 1
-    max_pages = 5  # Limit to prevent infinite loops
 
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     logger.debug("Chrome driver successfully initialized")
 
-    while page <= max_pages:  # Add a maximum page limit to prevent infinite loops
+    while True:  # Add a maximum page limit to prevent infinite loops
         url = f"{category.url}?pageSize=100&currentPage={page}"
         logger.debug(f"Loading page: {url}")
 
@@ -123,35 +126,8 @@ def get_rimi_items_by_category(category, driver):
             if extracted_products and len(extracted_products) > 0:
                 products = extracted_products
             else:
-                logger.debug(f"Found no products using script")
-
-            # Check if we found any products
-            if len(products) == 0:
-                # Check if we're on a page with no products (end of pagination or empty category)
-                try:
-                    no_products_text = driver.execute_script('''
-                        const emptyEl = document.querySelector('.empty-search-results') || 
-                                       document.querySelector('.no-results') ||
-                                       document.querySelector('.empty-results');
-                        return emptyEl ? emptyEl.textContent.trim() : '';
-                    ''')
-
-                    if no_products_text:
-                        logger.info(f"Category appears to be empty or end of pagination: '{no_products_text}'")
-                        break
-                except Exception as e:
-                    logger.warning(f"Error checking for empty results: {str(e)}")
-
-                # If we're on page 1 and found no products, try one more time with a refresh
-                if page == 1:
-                    logger.warning("No products found on first page, trying with refresh")
-                    driver.refresh()
-                    time.sleep(10)
-                    page += 1
-                    continue
-                else:
-                    logger.info(f"No more products found after page {page - 1}, stopping pagination")
-                    break
+                logger.info(f"No more products found after page {page - 1}, stopping pagination")
+                break
 
             logger.debug(f"Raw products found on page {page}: {len(products)}")
 
