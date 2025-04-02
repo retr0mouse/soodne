@@ -138,9 +138,9 @@ def scrape_store_products():
         logger.info("=== Starting parsing process ===")
         
         stores = {
-            # "Barbora": "https://barbora.ee",
-            # "Rimi": "https://www.rimi.ee/epood/ee",
-            # "Selver": "https://www.selver.ee",
+            "Barbora": "https://barbora.ee",
+            "Rimi": "https://www.rimi.ee/epood/ee",
+            "Selver": "https://www.selver.ee",
             "Prisma": "https://www.prismamarket.ee"
         }
 
